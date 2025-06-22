@@ -2,7 +2,10 @@ import glfw
 from OpenGL.GL import *
 from OpenGL.GLU import *
 import numpy as np
-from math import sin, cos, radians
+from math import sin, cos, radians, pi, atan2, sqrt
+import OpenEXR
+import Imath
+import array
 
 class FirstPersonCamera:
     def __init__(self, position=(0, 1.6, 0), yaw=-90.0, pitch=0.0):
@@ -101,6 +104,90 @@ def draw_grid(size=100, spacing=1.0):
         
     glEnd()
 
+def load_exr_texture(filename):
+    # Open EXR file
+    exr_file = OpenEXR.InputFile(filename)
+    header = exr_file.header()
+    
+    # Get dimensions
+    dw = header['dataWindow']
+    width = dw.max.x - dw.min.x + 1
+    height = dw.max.y - dw.min.y + 1
+    
+    # Read channels
+    FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+    r_str = exr_file.channel('R', FLOAT)
+    g_str = exr_file.channel('G', FLOAT)
+    b_str = exr_file.channel('B', FLOAT)
+    
+    # Convert to numpy arrays
+    r = array.array('f', r_str)
+    g = array.array('f', g_str)
+    b = array.array('f', b_str)
+    
+    # Combine into RGB texture
+    texture_data = np.zeros((height, width, 3), dtype=np.float32)
+    for y in range(height):
+        for x in range(width):
+            idx = y * width + x
+            texture_data[y, x] = [r[idx], g[idx], b[idx]]
+    
+    # Create OpenGL texture
+    texture_id = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    
+    # Set texture parameters
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+    
+    # Upload texture data
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, texture_data)
+    
+    return texture_id
+
+def draw_skybox(texture_id, segments=64):
+    glEnable(GL_TEXTURE_2D)
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glColor3f(1.0, 1.0, 1.0)
+    
+    # Draw sphere inside-out for skybox
+    radius = 500.0
+    
+    for lat in range(segments):
+        lat0 = pi * (-0.5 + float(lat) / segments)
+        lat1 = pi * (-0.5 + float(lat + 1) / segments)
+        
+        glBegin(GL_QUAD_STRIP)
+        for lon in range(segments + 1):
+            lon_angle = 2 * pi * float(lon) / segments
+            
+            # First vertex
+            x0 = cos(lat0) * cos(lon_angle)
+            y0 = sin(lat0)
+            z0 = cos(lat0) * sin(lon_angle)
+            
+            # Second vertex
+            x1 = cos(lat1) * cos(lon_angle)
+            y1 = sin(lat1)
+            z1 = cos(lat1) * sin(lon_angle)
+            
+            # Texture coordinates (equirectangular mapping)
+            u = float(lon) / segments
+            v0 = 1.0 - (0.5 + lat0 / pi)
+            v1 = 1.0 - (0.5 + lat1 / pi)
+            
+            glTexCoord2f(u, v0)
+            glVertex3f(x0 * radius, y0 * radius, z0 * radius)
+            
+            glTexCoord2f(u, v1)
+            glVertex3f(x1 * radius, y1 * radius, z1 * radius)
+            
+        glEnd()
+    
+    glDisable(GL_TEXTURE_2D)
+
 def main():
     # Initialize GLFW
     if not glfw.init():
@@ -128,6 +215,9 @@ def main():
     
     # Create camera
     camera = FirstPersonCamera()
+    
+    # Load background texture
+    background_texture = load_exr_texture('background.exr')
     
     # Mouse callback
     def mouse_callback(window, xpos, ypos):
@@ -157,6 +247,11 @@ def main():
         # Set view matrix
         glLoadIdentity()
         camera.get_view_matrix()
+        
+        # Draw skybox first (disable depth writing)
+        glDepthMask(GL_FALSE)
+        draw_skybox(background_texture)
+        glDepthMask(GL_TRUE)
         
         # Draw grid
         draw_grid()
