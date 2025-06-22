@@ -5,7 +5,7 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 from math import radians, sin, cos
 
-class GaussianSplatRenderer:
+class GaussianSplatPointsRenderer:
     def __init__(self, ply_path):
         self.ply_path = ply_path
         self.positions = None

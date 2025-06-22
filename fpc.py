@@ -9,6 +9,7 @@ import array
 import os
 import sys
 from gaussian_splat_renderer import GaussianSplatRenderer
+from gaussian_splat_as_points_renderer import GaussianSplatPointsRenderer
 
 class FirstPersonCamera:
     def __init__(self, position=(0, 1.6, 0), yaw=-90.0, pitch=0.0):
