@@ -206,11 +206,23 @@ def main():
         return
     
     # Create window
-    width, height = 3600, 2000 
+    width, height = 3600, 2000
+    
+    # Get primary monitor for centering
+    monitor = glfw.get_primary_monitor()
+    mode = glfw.get_video_mode(monitor)
+    
+    # Calculate center position
+    pos_x = (mode.size.width - width) // 2
+    pos_y = (mode.size.height - height) // 2
+    
     window = glfw.create_window(width, height, "First Person Camera Demo", None, None)
     if not window:
         glfw.terminate()
         return
+    
+    # Set window position to center
+    glfw.set_window_pos(window, pos_x, pos_y)
     
     glfw.make_context_current(window)
     glfw.set_input_mode(window, glfw.CURSOR, glfw.CURSOR_DISABLED)
