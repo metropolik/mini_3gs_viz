@@ -247,7 +247,14 @@ def main():
     def mouse_callback(window, xpos, ypos):
         camera.process_mouse(xpos, ypos)
     
+    # Scroll callback for speed adjustment
+    def scroll_callback(window, xoffset, yoffset):
+        camera.speed *= 1.1 ** yoffset  # Increase/decrease by 10% per scroll
+        camera.speed = max(0.1, min(camera.speed, 50.0))  # Clamp between 0.1 and 50
+        print(f"Movement speed: {camera.speed:.1f}")
+    
     glfw.set_cursor_pos_callback(window, mouse_callback)
+    glfw.set_scroll_callback(window, scroll_callback)
     
     # Timing
     last_frame = 0.0
