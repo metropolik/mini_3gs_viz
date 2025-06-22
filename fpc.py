@@ -7,6 +7,8 @@ import OpenEXR
 import Imath
 import array
 import os
+import sys
+from gaussian_splat_renderer import GaussianSplatRenderer
 
 class FirstPersonCamera:
     def __init__(self, position=(0, 1.6, 0), yaw=-90.0, pitch=0.0):
@@ -201,6 +203,14 @@ def draw_skybox(texture_id, segments=64):
     glDisable(GL_TEXTURE_2D)
 
 def main():
+    # Parse command line arguments
+    ply_path = None
+    if len(sys.argv) > 1:
+        ply_path = sys.argv[1]
+        if not os.path.exists(ply_path):
+            print(f"Error: PLY file '{ply_path}' not found")
+            return
+    
     # Initialize GLFW
     if not glfw.init():
         return
@@ -242,6 +252,11 @@ def main():
     
     # Load background texture
     background_texture = load_exr_texture('background.exr')
+    
+    # Load Gaussian splat model if provided
+    splat_renderer = None
+    if ply_path:
+        splat_renderer = GaussianSplatRenderer(ply_path)
     
     # Mouse callback
     def mouse_callback(window, xpos, ypos):
@@ -286,6 +301,13 @@ def main():
         
         # Draw grid
         draw_grid()
+        
+        # Draw Gaussian splats if loaded
+        if splat_renderer:
+            # Get current matrices for proper rendering
+            projection_matrix = glGetDoublev(GL_PROJECTION_MATRIX)
+            modelview_matrix = glGetDoublev(GL_MODELVIEW_MATRIX)
+            splat_renderer.render(camera.position, modelview_matrix, projection_matrix)
         
         # Swap buffers and poll events
         glfw.swap_buffers(window)
