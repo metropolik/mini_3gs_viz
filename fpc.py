@@ -6,6 +6,7 @@ from math import sin, cos, radians, pi, atan2, sqrt
 import OpenEXR
 import Imath
 import array
+import os
 
 class FirstPersonCamera:
     def __init__(self, position=(0, 1.6, 0), yaw=-90.0, pitch=0.0):
@@ -105,32 +106,43 @@ def draw_grid(size=100, spacing=1.0):
     glEnd()
 
 def load_exr_texture(filename):
-    # Open EXR file
-    exr_file = OpenEXR.InputFile(filename)
-    header = exr_file.header()
+    cache_file = filename.replace('.exr', '_cache.npz')
     
-    # Get dimensions
-    dw = header['dataWindow']
-    width = dw.max.x - dw.min.x + 1
-    height = dw.max.y - dw.min.y + 1
-    
-    # Read channels
-    FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
-    r_str = exr_file.channel('R', FLOAT)
-    g_str = exr_file.channel('G', FLOAT)
-    b_str = exr_file.channel('B', FLOAT)
-    
-    # Convert to numpy arrays
-    r = array.array('f', r_str)
-    g = array.array('f', g_str)
-    b = array.array('f', b_str)
-    
-    # Combine into RGB texture
-    texture_data = np.zeros((height, width, 3), dtype=np.float32)
-    for y in range(height):
-        for x in range(width):
-            idx = y * width + x
-            texture_data[y, x] = [r[idx], g[idx], b[idx]]
+    # Check if cache exists
+    if os.path.exists(cache_file):
+        print(f"Loading cached texture from {cache_file}")
+        cache = np.load(cache_file)
+        texture_data = cache['texture_data']
+        width = cache['width']
+        height = cache['height']
+    else:
+        print(f"Loading EXR file {filename}")
+        # Open EXR file
+        exr_file = OpenEXR.InputFile(filename)
+        header = exr_file.header()
+        
+        # Get dimensions
+        dw = header['dataWindow']
+        width = dw.max.x - dw.min.x + 1
+        height = dw.max.y - dw.min.y + 1
+        
+        # Read channels
+        FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
+        r_str = exr_file.channel('R', FLOAT)
+        g_str = exr_file.channel('G', FLOAT)
+        b_str = exr_file.channel('B', FLOAT)
+        
+        # Convert to numpy arrays efficiently
+        r = np.frombuffer(r_str, dtype=np.float32).reshape(height, width)
+        g = np.frombuffer(g_str, dtype=np.float32).reshape(height, width)
+        b = np.frombuffer(b_str, dtype=np.float32).reshape(height, width)
+        
+        # Stack into RGB texture
+        texture_data = np.stack([r, g, b], axis=2)
+        
+        # Save cache
+        print(f"Saving cache to {cache_file}")
+        np.savez_compressed(cache_file, texture_data=texture_data, width=width, height=height)
     
     # Create OpenGL texture
     texture_id = glGenTextures(1)
