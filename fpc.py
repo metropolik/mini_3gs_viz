@@ -44,17 +44,20 @@ class FirstPersonCamera:
     def process_keyboard(self, window, delta_time):
         velocity = self.speed * delta_time
         
-        # Calculate front and right vectors
-        front_x = cos(radians(self.yaw))
-        front_z = sin(radians(self.yaw))
+        # Calculate front and right vectors (including vertical component for front)
+        front_x = cos(radians(self.yaw)) * cos(radians(self.pitch))
+        front_y = sin(radians(self.pitch))
+        front_z = sin(radians(self.yaw)) * cos(radians(self.pitch))
         right_x = sin(radians(self.yaw))
         right_z = -cos(radians(self.yaw))
         
         if glfw.get_key(window, glfw.KEY_W) == glfw.PRESS:
             self.position[0] += front_x * velocity
+            self.position[1] += front_y * velocity
             self.position[2] += front_z * velocity
         if glfw.get_key(window, glfw.KEY_S) == glfw.PRESS:
             self.position[0] -= front_x * velocity
+            self.position[1] -= front_y * velocity
             self.position[2] -= front_z * velocity
         if glfw.get_key(window, glfw.KEY_A) == glfw.PRESS:
             self.position[0] += right_x * velocity
@@ -258,6 +261,7 @@ def main():
     splat_renderer = None
     if ply_path:
         splat_renderer = GaussianSplatRenderer(ply_path)
+        #splat_renderer = GaussianSplatPointsRenderer(ply_path)
     
     # Mouse callback
     def mouse_callback(window, xpos, ypos):

@@ -4,6 +4,144 @@ import open3d.core as o3c
 from OpenGL.GL import *
 from OpenGL.GLU import *
 from math import radians, sin, cos
+import cupy as cp
+import time
+
+# CuPy kernel for projecting 3D Gaussians to 2D and calculating screen-space covariance
+project_gaussians_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void project_gaussians(
+    const float* positions,      // (N, 3)
+    const float* scales,         // (N, 3)
+    const float* rotations,      // (N, 4) quaternions
+    const float* view_matrix,    // (4, 4)
+    const float* proj_matrix,    // (4, 4)
+    float* depths,              // (N,) output depths for sorting
+    float* cov2d,               // (N, 3) output 2D covariance (a, b, c) where cov = [[a, b], [b, c]]
+    float* screen_pos,          // (N, 2) output screen positions
+    int N
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    
+    // Get position
+    float x = positions[idx * 3 + 0];
+    float y = positions[idx * 3 + 1];
+    float z = positions[idx * 3 + 2];
+    
+    // Transform to view space
+    float vx = view_matrix[0] * x + view_matrix[4] * y + view_matrix[8] * z + view_matrix[12];
+    float vy = view_matrix[1] * x + view_matrix[5] * y + view_matrix[9] * z + view_matrix[13];
+    float vz = view_matrix[2] * x + view_matrix[6] * y + view_matrix[10] * z + view_matrix[14];
+    
+    depths[idx] = -vz;  // Negative for proper sorting (closer = larger)
+    
+    // Project to screen space
+    float px = proj_matrix[0] * vx + proj_matrix[4] * vy + proj_matrix[8] * vz + proj_matrix[12];
+    float py = proj_matrix[1] * vx + proj_matrix[5] * vy + proj_matrix[9] * vz + proj_matrix[13];
+    float pw = proj_matrix[3] * vx + proj_matrix[7] * vy + proj_matrix[11] * vz + proj_matrix[15];
+    
+    screen_pos[idx * 2 + 0] = px / pw;
+    screen_pos[idx * 2 + 1] = py / pw;
+    
+    // Simplified 2D covariance calculation (identity for now)
+    // TODO: Proper 3D to 2D projection of covariance
+    float sx = scales[idx * 3 + 0];
+    float sy = scales[idx * 3 + 1];
+    
+    // Simple isotropic 2D covariance based on average scale
+    float avg_scale = (sx + sy) * 0.5f;
+    cov2d[idx * 3 + 0] = avg_scale * avg_scale;  // a
+    cov2d[idx * 3 + 1] = 0.0f;                   // b
+    cov2d[idx * 3 + 2] = avg_scale * avg_scale;  // c
+}
+''', 'project_gaussians')
+
+# CUDA kernel for generating quad vertices from sorted Gaussians
+generate_quads_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void generate_quads(
+    const int* sorted_indices,   // (N,) sorted indices
+    const float* screen_pos,     // (N, 2) screen positions
+    const float* cov2d,          // (N, 3) 2D covariances
+    const float* colors,         // (N, 3) RGB colors
+    const float* opacities,      // (N,) opacities
+    float* vertices,            // (N*4, 3) output vertex positions (x,y,z)
+    float* vertex_colors,       // (N*4, 4) output vertex colors (r,g,b,a)
+    int N
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    
+    int i = sorted_indices[idx];
+    
+    // Get 2D covariance parameters
+    float a = cov2d[i * 3 + 0];
+    float b = cov2d[i * 3 + 1];
+    float c = cov2d[i * 3 + 2];
+    
+    // Screen position
+    float sx = screen_pos[i * 2 + 0];
+    float sy = screen_pos[i * 2 + 1];
+    
+    // Calculate eigenvalues for ellipse axes (3-sigma)
+    float det = a * c - b * b;
+    
+    float radius_x = 0.0f;
+    float radius_y = 0.0f;
+    float alpha = opacities[i];
+    
+    // Check if valid and on screen
+    if (det > 0 && fabsf(sx) <= 1.5f && fabsf(sy) <= 1.5f) {
+        float trace = a + c;
+        float sqrt_discriminant = sqrtf(trace * trace - 4 * det);
+        float lambda1 = 0.5f * (trace + sqrt_discriminant);
+        float lambda2 = 0.5f * (trace - sqrt_discriminant);
+        
+        // 3-sigma radii
+        radius_x = 3.0f * sqrtf(lambda1);
+        radius_y = 3.0f * sqrtf(lambda2);
+    } else {
+        // Make invalid quads invisible
+        alpha = 0.0f;
+    }
+    
+    // Generate quad vertices (counter-clockwise)
+    int base_idx = idx * 4;
+    
+    // Bottom-left
+    vertices[(base_idx + 0) * 3 + 0] = sx - radius_x;
+    vertices[(base_idx + 0) * 3 + 1] = sy - radius_y;
+    vertices[(base_idx + 0) * 3 + 2] = 0.0f;
+    
+    // Bottom-right
+    vertices[(base_idx + 1) * 3 + 0] = sx + radius_x;
+    vertices[(base_idx + 1) * 3 + 1] = sy - radius_y;
+    vertices[(base_idx + 1) * 3 + 2] = 0.0f;
+    
+    // Top-right
+    vertices[(base_idx + 2) * 3 + 0] = sx + radius_x;
+    vertices[(base_idx + 2) * 3 + 1] = sy + radius_y;
+    vertices[(base_idx + 2) * 3 + 2] = 0.0f;
+    
+    // Top-left
+    vertices[(base_idx + 3) * 3 + 0] = sx - radius_x;
+    vertices[(base_idx + 3) * 3 + 1] = sy + radius_y;
+    vertices[(base_idx + 3) * 3 + 2] = 0.0f;
+    
+    // Set colors for all 4 vertices
+    float red = colors[i * 3 + 0];
+    float green = colors[i * 3 + 1];
+    float blue = colors[i * 3 + 2];
+    
+    for (int v = 0; v < 4; v++) {
+        vertex_colors[(base_idx + v) * 4 + 0] = red;
+        vertex_colors[(base_idx + v) * 4 + 1] = green;
+        vertex_colors[(base_idx + v) * 4 + 2] = blue;
+        vertex_colors[(base_idx + v) * 4 + 3] = alpha;
+    }
+}
+''', 'generate_quads')
 
 class GaussianSplatRenderer:
     def __init__(self, ply_path):
@@ -14,6 +152,12 @@ class GaussianSplatRenderer:
         self.rotations = None
         self.opacities = None
         self.sh_coeffs = None
+        
+        # VBO handles
+        self.vbo_vertices = None
+        self.vbo_colors = None
+        self.vertices_gpu = None
+        self.vertex_colors_gpu = None
         
         self.load_ply()
         
@@ -123,29 +267,95 @@ class GaussianSplatRenderer:
         if self.positions is None:
             return
         
-        # Enable vertex arrays
+        N = len(self.positions)
+        
+        # Convert data to CuPy arrays
+        t0 = time.perf_counter()
+        positions_gpu = cp.asarray(self.positions, dtype=cp.float32)
+        scales_gpu = cp.asarray(self.scales if self.scales is not None else np.ones((N, 3)), dtype=cp.float32)
+        rotations_gpu = cp.asarray(self.rotations if self.rotations is not None else np.tile([1, 0, 0, 0], (N, 1)), dtype=cp.float32)
+        colors_gpu = cp.asarray(self.colors, dtype=cp.float32)
+        opacities_gpu = cp.asarray(self.opacities if self.opacities is not None else np.ones(N) * 0.9, dtype=cp.float32)
+        
+        # Flatten matrices for GPU
+        view_flat = cp.asarray(view_matrix.flatten(), dtype=cp.float32)
+        proj_flat = cp.asarray(projection_matrix.flatten(), dtype=cp.float32)
+        t1 = time.perf_counter()
+        print(f"GPU upload: {(t1-t0)*1000:.2f}ms")
+        
+        # Allocate output arrays for projection
+        t0 = time.perf_counter()
+        depths_gpu = cp.zeros(N, dtype=cp.float32)
+        cov2d_gpu = cp.zeros((N, 3), dtype=cp.float32)
+        screen_pos_gpu = cp.zeros((N, 2), dtype=cp.float32)
+        t1 = time.perf_counter()
+        print(f"GPU allocation: {(t1-t0)*1000:.2f}ms")
+        
+        # Launch projection kernel
+        t0 = time.perf_counter()
+        threads_per_block = 256
+        blocks = (N + threads_per_block - 1) // threads_per_block
+        
+        project_gaussians_kernel(
+            (blocks,), (threads_per_block,),
+            (positions_gpu, scales_gpu, rotations_gpu, view_flat, proj_flat,
+             depths_gpu, cov2d_gpu, screen_pos_gpu, N)
+        )
+        cp.cuda.runtime.deviceSynchronize()
+        t1 = time.perf_counter()
+        print(f"Projection kernel: {(t1-t0)*1000:.2f}ms")
+        
+        # Sort by depth
+        t0 = time.perf_counter()
+        sort_indices = cp.argsort(depths_gpu)
+        cp.cuda.runtime.deviceSynchronize()
+        t1 = time.perf_counter()
+        print(f"GPU sort: {(t1-t0)*1000:.2f}ms")
+        
+        # Allocate output arrays for quad generation
+        t0 = time.perf_counter()
+        vertices_gpu = cp.zeros((N * 4, 3), dtype=cp.float32)
+        vertex_colors_gpu = cp.zeros((N * 4, 4), dtype=cp.float32)
+        t1 = time.perf_counter()
+        print(f"Quad GPU allocation: {(t1-t0)*1000:.2f}ms")
+        
+        # Launch quad generation kernel
+        t0 = time.perf_counter()
+        generate_quads_kernel(
+            (blocks,), (threads_per_block,),
+            (sort_indices, screen_pos_gpu, cov2d_gpu, colors_gpu, opacities_gpu,
+             vertices_gpu, vertex_colors_gpu, N)
+        )
+        cp.cuda.runtime.deviceSynchronize()
+        t1 = time.perf_counter()
+        print(f"Quad generation kernel: {(t1-t0)*1000:.2f}ms")
+        
+        # Transfer data back to CPU
+        t0 = time.perf_counter()
+        vertices = vertices_gpu.get()
+        vertex_colors = vertex_colors_gpu.get()
+        t1 = time.perf_counter()
+        print(f"GPU to CPU transfer: {(t1-t0)*1000:.2f}ms")
+        
+        # Enable blending for transparency
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # Set up vertex arrays
         glEnableClientState(GL_VERTEX_ARRAY)
         glEnableClientState(GL_COLOR_ARRAY)
         
-        # Set point size
-        glPointSize(3.0)
+        glVertexPointer(3, GL_FLOAT, 0, vertices)
+        glColorPointer(4, GL_FLOAT, 0, vertex_colors)
         
-        # Set vertex data
-        glVertexPointer(3, GL_FLOAT, 0, self.positions)
+        # Draw all quads directly
+        t0 = time.perf_counter()
+        # Draw using GL_QUADS (each 4 vertices forms a quad)
+        glDrawArrays(GL_QUADS, 0, N * 4)
+        t1 = time.perf_counter()
+        print(f"OpenGL draw: {(t1-t0)*1000:.2f}ms")
         
-        # Set color data
-        if self.colors is not None:
-            glColorPointer(3, GL_FLOAT, 0, self.colors)
-        else:
-            # Use white color for all points
-            white_colors = np.ones((len(self.positions), 3), dtype=np.float32)
-            glColorPointer(3, GL_FLOAT, 0, white_colors)
-        
-        # Draw all points at once
-        glDrawArrays(GL_POINTS, 0, len(self.positions))
-        
-        # Disable vertex arrays
         glDisableClientState(GL_VERTEX_ARRAY)
         glDisableClientState(GL_COLOR_ARRAY)
-        
-        # TODO: Implement proper Gaussian splat rendering with sorting, splatting, etc.
+        glDisable(GL_BLEND)
+        print("---")
