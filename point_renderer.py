@@ -47,6 +47,10 @@ class PointRenderer:
         self.shader_program = None
         self.vao = None
         self.vbo = None
+        self.quad_vao = None        # VAO for quad rendering
+        self.quad_vbo = None        # VBO for quad vertices
+        self.quad_uv_vbo = None     # VBO for UV coordinates
+        self.quad_data_vbo = None   # VBO for per-quad data
         self.num_points = 0
         
         # CPU transformation objects
@@ -62,6 +66,7 @@ class PointRenderer:
         self.transform_kernel = None
         self.transform_perspective_kernel = None
         self.covariance_kernel = None
+        self.quad_generation_kernel = None
         if CUPY_AVAILABLE:
             self._load_transform_kernel()
         else:
@@ -120,7 +125,8 @@ class PointRenderer:
             self.transform_kernel = cp.RawKernel(kernel_source, 'transform_points')
             self.transform_perspective_kernel = cp.RawKernel(kernel_source, 'transform_points_with_perspective')
             self.covariance_kernel = cp.RawKernel(kernel_source, 'compute_2d_covariance')
-            print("Custom transform and covariance kernels loaded successfully")
+            self.quad_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_vertices')
+            print("Custom transform, covariance, and quad generation kernels loaded successfully")
         except Exception as e:
             raise RuntimeError(f"Failed to load transform kernels: {e}")
     
@@ -225,7 +231,10 @@ class PointRenderer:
             scales = np.squeeze(scales)
             if scales.ndim == 3 and scales.shape[1] == 1:
                 scales = scales.squeeze(1)
-            print(f"Scale data shape: {scales.shape}, range: [{scales.min():.4f}, {scales.max():.4f}]")
+            print(f"Scale data shape (log space): {scales.shape}, range: [{scales.min():.4f}, {scales.max():.4f}]")
+            # Convert from log space to linear space
+            scales = np.exp(scales)
+            print(f"Scale data (linear space) range: [{scales.min():.6f}, {scales.max():.6f}]")
         else:
             print("No scale vectors found, using default scales")
             scales = np.ones((len(positions), 3)) * 0.01  # Small default scale
@@ -242,7 +251,11 @@ class PointRenderer:
             rotations = np.squeeze(rotations)
             if rotations.ndim == 3 and rotations.shape[1] == 1:
                 rotations = rotations.squeeze(1)
-            print(f"Rotation data shape: {rotations.shape}, range: [{rotations.min():.4f}, {rotations.max():.4f}]")
+            print(f"Rotation data shape (raw): {rotations.shape}, range: [{rotations.min():.4f}, {rotations.max():.4f}]")
+            # Normalize quaternions to ensure they are unit quaternions
+            norms = np.linalg.norm(rotations, axis=1, keepdims=True)
+            rotations = rotations / norms
+            print(f"Rotation data (normalized) range: [{rotations.min():.6f}, {rotations.max():.6f}]")
         else:
             print("No rotation quaternions found, using identity rotations")
             rotations = np.zeros((len(positions), 4))
@@ -256,7 +269,10 @@ class PointRenderer:
             opacity = np.squeeze(opacity)
             if opacity.ndim == 2 and opacity.shape[1] == 1:
                 opacity = opacity.squeeze(1)
-            print(f"Opacity data shape: {opacity.shape}, range: [{opacity.min():.4f}, {opacity.max():.4f}]")
+            print(f"Opacity data shape (logit space): {opacity.shape}, range: [{opacity.min():.4f}, {opacity.max():.4f}]")
+            # Convert from logit space to probability using sigmoid
+            opacity = 1.0 / (1.0 + np.exp(-opacity))
+            print(f"Opacity data (probability space) range: [{opacity.min():.6f}, {opacity.max():.6f}]")
         else:
             print("No opacity values found, using full opacity")
             opacity = np.ones(len(positions))
@@ -352,16 +368,48 @@ class PointRenderer:
         gpu_quad_params = cp.zeros((self.num_points, 4), dtype=cp.float32)  # center_x, center_y, radius_x, radius_y
         gpu_visibility_mask = cp.zeros(self.num_points, dtype=cp.int32)
         
+        # Get viewport dimensions for NDC conversion
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        viewport_width = float(viewport[2])
+        viewport_height = float(viewport[3])
+        
         self.covariance_kernel((grid_size,), (block_size,), 
                              (gpu_view_space_sorted, gpu_scales_sorted, gpu_rotations_sorted,
-                              gpu_mv, gpu_p, gpu_cov2d, gpu_quad_params, gpu_visibility_mask, self.num_points))
+                              gpu_mv, gpu_p, gpu_cov2d, gpu_quad_params, gpu_visibility_mask,
+                              viewport_width, viewport_height, self.num_points))
         
-        # Second transformation: Apply Projection matrix with perspective division (for point centers)
+        # Generate quad vertices for visible Gaussians
+        max_quads = self.num_points  # Maximum possible number of quads
+        gpu_quad_vertices = cp.zeros((max_quads * 4, 6), dtype=cp.float32)  # 4 vertices per quad, 6 floats per vertex
+        gpu_quad_uvs = cp.zeros((max_quads * 4, 2), dtype=cp.float32)       # 4 vertices per quad, 2 UV per vertex
+        gpu_quad_data = cp.zeros((max_quads, 4), dtype=cp.float32)          # Per-quad data (opacity + inverse covariance)
+        gpu_visible_count = cp.zeros(1, dtype=cp.int32)                    # Counter for visible quads
+        
+        self.quad_generation_kernel((grid_size,), (block_size,),
+                                  (gpu_quad_params, gpu_cov2d, gpu_visibility_mask,
+                                   gpu_colors_sorted, gpu_opacities_sorted,
+                                   gpu_quad_vertices, gpu_quad_uvs, gpu_quad_data,
+                                   gpu_visible_count, self.num_points))
+        
+        # Get the actual number of visible quads
+        visible_count = int(cp.asnumpy(gpu_visible_count)[0])
+        
+        # Second transformation: Apply Projection matrix with perspective division (for point centers - for debugging)
         gpu_transformed_positions = cp.zeros((self.num_points, 3), dtype=cp.float32)
         self.transform_perspective_kernel((grid_size,), (block_size,), 
                                         (gpu_p, gpu_view_space_sorted, gpu_transformed_positions, self.num_points))
         
-        # Transfer back to CPU for rendering
+        # Transfer quad data back to CPU for rendering
+        if visible_count > 0:
+            quad_vertices = cp.asnumpy(gpu_quad_vertices[:visible_count * 4])
+            quad_uvs = cp.asnumpy(gpu_quad_uvs[:visible_count * 4])
+            quad_data = cp.asnumpy(gpu_quad_data[:visible_count])
+        else:
+            quad_vertices = np.array([], dtype=np.float32)
+            quad_uvs = np.array([], dtype=np.float32)
+            quad_data = np.array([], dtype=np.float32)
+        
+        # Transfer debug data
         transformed_positions = cp.asnumpy(gpu_transformed_positions)
         colors_sorted = cp.asnumpy(gpu_colors_sorted)
         cov2d_data = cp.asnumpy(gpu_cov2d)
@@ -370,7 +418,8 @@ class PointRenderer:
         
         # Debug output for first frame
         if not self._debug_printed:
-            print("=== GAUSSIAN SPLATTING PIPELINE WITH 2D COVARIANCE ===")
+            print("=== GAUSSIAN SPLATTING PIPELINE WITH QUAD GENERATION ===")
+            print("Viewport dimensions:", viewport_width, "x", viewport_height)
             print("First 3 original points:", self.original_positions[:3])
             print("First 3 view-space points (unsorted):", cp.asnumpy(gpu_view_space[:3]))
             print("First 3 view-space z-values (sorted):", cp.asnumpy(view_z[sorted_indices[:3]]))
@@ -378,9 +427,33 @@ class PointRenderer:
             print("First 3 2D covariance matrices:", cov2d_data[:3])
             print("First 3 quad parameters (center_x, center_y, radius_x, radius_y):", quad_params[:3])
             print("Visible Gaussians:", visibility_mask.sum(), "/", len(visibility_mask))
+            print("Generated quads:", visible_count)
+            if visible_count > 0:
+                print("First quad vertices (4 vertices):", quad_vertices[:4])
+                print("First quad UVs:", quad_uvs[:4])
+                print("First quad data (opacity, inv_cov):", quad_data[0] if len(quad_data) > 0 else "None")
+            else:
+                print("NO QUADS GENERATED - checking first few visibility results...")
+                print("First 10 visibility mask values:", visibility_mask[:10])
+                print("First 3 view-space z values:", cp.asnumpy(gpu_view_space[:3, 2]))
+                if visibility_mask.sum() == 0:
+                    print("All Gaussians failed visibility test!")
+                    print("Checking potential issues:")
+                    print("- View space z range:", cp.asnumpy(gpu_view_space[:, 2]).min(), "to", cp.asnumpy(gpu_view_space[:, 2]).max())
+                    print("- Are z values positive (behind camera)?", (cp.asnumpy(gpu_view_space[:, 2]) > 0).sum(), "out of", len(gpu_view_space))
             print("Sorting indices (first 10):", cp.asnumpy(sorted_indices[:10]))
             self._debug_printed = True
         
+        # Set up quad VAO and VBOs if not already done
+        if self.quad_vao is None:
+            self._setup_quad_rendering()
+        
+        # Render quads if we have any visible ones
+        if visible_count > 0:
+            self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count)
+        
+        # Always render original points for comparison/debugging (for now)
+        # Comment this out once quad rendering is working properly
         # Create interleaved vertex data with transformed positions and sorted colors
         vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
         vertex_data[:, :3] = transformed_positions
@@ -400,11 +473,85 @@ class PointRenderer:
         
         glUseProgram(0)
     
+    def _setup_quad_rendering(self):
+        """Set up OpenGL objects for quad rendering"""
+        # Create quad VAO and VBOs
+        self.quad_vao = glGenVertexArrays(1)
+        self.quad_vbo = glGenBuffers(1)           # Vertex positions and colors
+        self.quad_uv_vbo = glGenBuffers(1)        # UV coordinates
+        self.quad_data_vbo = glGenBuffers(1)      # Per-quad data (opacity, inverse covariance)
+        
+        glBindVertexArray(self.quad_vao)
+        
+        # Set up vertex position and color buffer (6 floats per vertex: x,y,z,r,g,b)
+        glBindBuffer(GL_ARRAY_BUFFER, self.quad_vbo)
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, None)           # Position
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))  # Color
+        glEnableVertexAttribArray(1)
+        
+        # Set up UV coordinates buffer (2 floats per vertex: u,v)
+        glBindBuffer(GL_ARRAY_BUFFER, self.quad_uv_vbo)
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 2 * 4, None)           # UV coordinates
+        glEnableVertexAttribArray(2)
+        
+        # Set up per-quad data buffer (4 floats per quad: opacity, inv_cov_00, inv_cov_01, inv_cov_11)
+        # This will be instanced - each quad gets one set of data
+        glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
+        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 4 * 4, None)           # Quad data
+        glEnableVertexAttribArray(3)
+        glVertexAttribDivisor(3, 4)  # Advance per 4 vertices (one quad)
+        
+        glBindVertexArray(0)
+        print("Quad rendering setup complete")
+    
+    def _render_quads(self, quad_vertices, quad_uvs, quad_data, visible_count):
+        """Render the generated quads"""
+        # Update quad vertex buffer
+        glBindBuffer(GL_ARRAY_BUFFER, self.quad_vbo)
+        glBufferData(GL_ARRAY_BUFFER, quad_vertices.nbytes, quad_vertices, GL_DYNAMIC_DRAW)
+        
+        # Update UV buffer
+        glBindBuffer(GL_ARRAY_BUFFER, self.quad_uv_vbo)
+        glBufferData(GL_ARRAY_BUFFER, quad_uvs.nbytes, quad_uvs, GL_DYNAMIC_DRAW)
+        
+        # Update per-quad data buffer
+        glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
+        glBufferData(GL_ARRAY_BUFFER, quad_data.nbytes, quad_data, GL_DYNAMIC_DRAW)
+        
+        # Enable alpha blending for transparency
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # Render quads using current shader
+        glUseProgram(self.shader_program)
+        glBindVertexArray(self.quad_vao)
+        
+        # Draw as triangles (2 triangles per quad = 6 vertices per quad)
+        # But we have 4 vertices per quad, so we need to use an index buffer or draw as triangle strip
+        # For now, let's draw each quad as two triangles using GL_TRIANGLES with repeated vertices
+        # We'll need to generate proper triangle indices
+        
+        # For now, render as points to test the pipeline
+        glDrawArrays(GL_POINTS, 0, visible_count * 4)
+        
+        glBindVertexArray(0)
+        glUseProgram(0)
+        glDisable(GL_BLEND)
+    
     def cleanup(self):
         """Clean up OpenGL resources"""
         if self.vao:
             glDeleteVertexArrays(1, [self.vao])
         if self.vbo:
             glDeleteBuffers(1, [self.vbo])
+        if self.quad_vao:
+            glDeleteVertexArrays(1, [self.quad_vao])
+        if self.quad_vbo:
+            glDeleteBuffers(1, [self.quad_vbo])
+        if self.quad_uv_vbo:
+            glDeleteBuffers(1, [self.quad_uv_vbo])
+        if self.quad_data_vbo:
+            glDeleteBuffers(1, [self.quad_data_vbo])
         if self.shader_program:
             glDeleteProgram(self.shader_program)

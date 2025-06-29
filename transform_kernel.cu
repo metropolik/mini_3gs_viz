@@ -83,6 +83,8 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
                           float* cov2d_data,                    // Output: 2D covariance matrices (3 components: cov[0,0], cov[0,1], cov[1,1])
                           float* quad_params,                   // Output: Quad parameters (4 components: center_x, center_y, radius_x, radius_y)
                           int* visibility_mask,                 // Output: Visibility mask (1 if visible, 0 if culled)
+                          float viewport_width,                 // Viewport width in pixels
+                          float viewport_height,                // Viewport height in pixels
                           int num_points) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -187,25 +189,152 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float lambda2 = 0.5f * (trace - sqrt_disc);
     
     // Compute radii (3σ = 3 * sqrt(eigenvalue))
-    float radius_x = 3.0f * sqrtf(fmaxf(lambda1, 1e-6f));
-    float radius_y = 3.0f * sqrtf(fmaxf(lambda2, 1e-6f));
+    float radius_x_pixels = 3.0f * sqrtf(fmaxf(lambda1, 1e-6f));
+    float radius_y_pixels = 3.0f * sqrtf(fmaxf(lambda2, 1e-6f));
     
     // Cull if quad would be too small (less than 1 pixel)
-    if (radius_x < 1.0f || radius_y < 1.0f) {
+    if (radius_x_pixels < 1.0f || radius_y_pixels < 1.0f) {
         visibility_mask[idx] = 0;
         return;
     }
     
-    // Project center to screen coordinates
+    // Project center to normalized device coordinates (NDC)
     float center_x = vx * inv_z;
     float center_y = vy * inv_z;
     
-    // Store quad parameters
+    // Convert pixel radii to NDC space
+    // NDC space spans [-1, 1], so 2 NDC units = viewport_width pixels
+    float radius_x_ndc = (2.0f * radius_x_pixels) / viewport_width;
+    float radius_y_ndc = (2.0f * radius_y_pixels) / viewport_height;
+    
+    // Store quad parameters (all in NDC space)
     quad_params[quad_offset + 0] = center_x;
     quad_params[quad_offset + 1] = center_y;
-    quad_params[quad_offset + 2] = radius_x;
-    quad_params[quad_offset + 3] = radius_y;
+    quad_params[quad_offset + 2] = radius_x_ndc;
+    quad_params[quad_offset + 3] = radius_y_ndc;
     
     // Mark as visible
     visibility_mask[idx] = 1;
+}
+
+// Generate quad vertices for visible Gaussians
+extern "C" __global__
+void generate_quad_vertices(const float* quad_params,           // Quad parameters (center_x, center_y, radius_x, radius_y)
+                           const float* cov2d_data,             // 2D covariance matrices (3 components each)
+                           const int* visibility_mask,         // Visibility mask
+                           const float* colors,                // Colors (3 components each)
+                           const float* opacities,             // Opacity values
+                           float* quad_vertices,               // Output: Quad vertices (6 floats per vertex: x,y,z,r,g,b)
+                           float* quad_uvs,                    // Output: UV coordinates (2 floats per vertex)
+                           float* quad_data,                   // Output: Per-quad data (opacity + 2D covariance inverse)
+                           int* visible_count,                 // Output: Number of visible quads
+                           int num_points) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx >= num_points) return;
+    
+    // Skip if not visible
+    if (visibility_mask[idx] == 0) return;
+    
+    // Load quad parameters and check validity first
+    int param_offset = idx * 4;
+    float center_x = quad_params[param_offset + 0];
+    float center_y = quad_params[param_offset + 1];
+    float radius_x = quad_params[param_offset + 2];
+    float radius_y = quad_params[param_offset + 3];
+    
+    // Skip if quad parameters are invalid (zero radius means it was culled)
+    if (radius_x <= 0.0f || radius_y <= 0.0f) {
+        return;
+    }
+    
+    // Get atomic counter for visible quad index (only after validation)
+    int quad_idx = atomicAdd(visible_count, 1);
+    
+    // Load 2D covariance matrix
+    int cov_offset = idx * 3;
+    float cov_00 = cov2d_data[cov_offset + 0];
+    float cov_01 = cov2d_data[cov_offset + 1];
+    float cov_11 = cov2d_data[cov_offset + 2];
+    
+    // Compute inverse of 2D covariance matrix for fragment shader
+    float det = cov_00 * cov_11 - cov_01 * cov_01;
+    
+    // Skip if covariance matrix is degenerate
+    if (det <= 1e-6f || cov_00 <= 1e-6f || cov_11 <= 1e-6f) {
+        return;
+    }
+    
+    float inv_det = 1.0f / det;
+    float inv_cov_00 = cov_11 * inv_det;
+    float inv_cov_01 = -cov_01 * inv_det;
+    float inv_cov_11 = cov_00 * inv_det;
+    
+    // Load color and opacity
+    int color_offset = idx * 3;
+    float r = colors[color_offset + 0];
+    float g = colors[color_offset + 1];
+    float b = colors[color_offset + 2];
+    float opacity = opacities[idx];
+    
+    // Compute eigenvectors for oriented quad
+    // For symmetric matrix [[a,b],[b,c]], eigenvector of larger eigenvalue:
+    float trace = cov_00 + cov_11;
+    float discriminant = trace * trace - 4.0f * det;
+    float sqrt_disc = sqrtf(fmaxf(discriminant, 0.0f));
+    float lambda1 = 0.5f * (trace + sqrt_disc);
+    
+    // Eigenvector corresponding to lambda1
+    float evec_x, evec_y;
+    if (fabsf(cov_01) > 1e-6f) {
+        evec_x = lambda1 - cov_11;
+        evec_y = cov_01;
+        float norm = sqrtf(evec_x * evec_x + evec_y * evec_y);
+        evec_x /= norm;
+        evec_y /= norm;
+    } else {
+        // Diagonal matrix case
+        evec_x = 1.0f;
+        evec_y = 0.0f;
+    }
+    
+    // Generate 4 vertices for the quad
+    // Vertex layout: bottom-left, bottom-right, top-left, top-right
+    float offsets_x[4] = {-1.0f, 1.0f, -1.0f, 1.0f};
+    float offsets_y[4] = {-1.0f, -1.0f, 1.0f, 1.0f};
+    float uvs[8] = {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+    
+    for (int i = 0; i < 4; i++) {
+        int vertex_idx = quad_idx * 4 + i;
+        int vertex_offset = vertex_idx * 6;  // 6 floats per vertex (x,y,z,r,g,b)
+        int uv_offset = vertex_idx * 2;      // 2 floats per vertex (u,v)
+        
+        // Rotate and scale offset by covariance eigenvectors
+        float local_x = offsets_x[i] * radius_x;
+        float local_y = offsets_y[i] * radius_y;
+        
+        float world_x = evec_x * local_x - evec_y * local_y;
+        float world_y = evec_y * local_x + evec_x * local_y;
+        
+        // Store vertex position (in NDC space, z=0 for screen-aligned quads)
+        quad_vertices[vertex_offset + 0] = center_x + world_x;
+        quad_vertices[vertex_offset + 1] = center_y + world_y;
+        quad_vertices[vertex_offset + 2] = 0.0f;  // Screen-aligned
+        
+        // Store vertex color
+        quad_vertices[vertex_offset + 3] = r;
+        quad_vertices[vertex_offset + 4] = g;
+        quad_vertices[vertex_offset + 5] = b;
+        
+        // Store UV coordinates
+        quad_uvs[uv_offset + 0] = uvs[i * 2 + 0];
+        quad_uvs[uv_offset + 1] = uvs[i * 2 + 1];
+    }
+    
+    // Store per-quad data for fragment shader
+    int quad_data_offset = quad_idx * 4;  // opacity + 3 inverse covariance components
+    quad_data[quad_data_offset + 0] = opacity;
+    quad_data[quad_data_offset + 1] = inv_cov_00;
+    quad_data[quad_data_offset + 2] = inv_cov_01;
+    quad_data[quad_data_offset + 3] = inv_cov_11;
 }
