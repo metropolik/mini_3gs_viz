@@ -7,6 +7,7 @@ import sys
 import OpenEXR
 import Imath
 import ctypes
+import open3d as o3d
 
 # Vertex shader for grid
 grid_vertex_shader = """
@@ -60,6 +61,36 @@ uniform sampler2D uTexture;
 void main()
 {
     vec3 color = texture(uTexture, TexCoord).rgb;
+    FragColor = vec4(color, 1.0);
+}
+"""
+
+# Vertex shader for point rendering
+point_vertex_shader = """
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec3 aColor;
+
+uniform mat4 uMVP;
+
+out vec3 color;
+
+void main()
+{
+    gl_Position = uMVP * vec4(aPos, 1.0);
+    gl_PointSize = 3.0;
+    color = aColor;
+}
+"""
+
+# Fragment shader for point rendering
+point_fragment_shader = """
+#version 330 core
+in vec3 color;
+out vec4 FragColor;
+
+void main()
+{
     FragColor = vec4(color, 1.0);
 }
 """
@@ -327,6 +358,52 @@ def create_skybox_sphere(segments=32):
     
     return np.array(vertices, dtype=np.float32)
 
+def load_ply(ply_path):
+    """Load PLY file and extract positions and colors"""
+    print(f"Loading Gaussian splat model from {ply_path}")
+    
+    # Load PLY file using Open3D tensor API
+    pcd_t = o3d.t.io.read_point_cloud(ply_path)
+    
+    # Extract positions (x, y, z)
+    positions = None
+    if pcd_t.point.positions is not None:
+        positions = pcd_t.point.positions.numpy()
+        # Apply 180-degree rotation around X axis to match coordinate system
+        rot_angle = radians(180)
+        rots = sin(rot_angle)
+        rotc = cos(rot_angle)
+        rot_mat = np.array([[1.0, 0.0, 0.0],
+                            [0.0, rotc, -rots],
+                            [0.0, rots, rotc]])
+        positions = (rot_mat @ positions.T).T
+        print(f"Loaded {len(positions)} points")
+    
+    # Extract colors if available (f_dc_0, f_dc_1, f_dc_2)
+    colors = None
+    if 'f_dc_0' in pcd_t.point:
+        print("Found spherical harmonics colors")
+        dc_0 = pcd_t.point['f_dc_0'].numpy()
+        dc_1 = pcd_t.point['f_dc_1'].numpy()
+        dc_2 = pcd_t.point['f_dc_2'].numpy()
+        colors = np.stack([dc_0, dc_1, dc_2], axis=-1)
+        colors = np.squeeze(colors)
+        if colors.ndim == 3 and colors.shape[1] == 1:
+            colors = colors.squeeze(1)
+        # Convert from SH DC term to RGB (SH DC term is scaled)
+        colors = 0.5 + colors * 0.28209479177387814
+        colors = np.clip(colors, 0, 1)
+    else:
+        print("No colors found, using white")
+        colors = np.ones((len(positions), 3))
+    
+    # Create interleaved vertex data (position + color)
+    vertex_data = np.zeros((len(positions), 6), dtype=np.float32)
+    vertex_data[:, :3] = positions
+    vertex_data[:, 3:6] = colors
+    
+    return vertex_data.flatten(), len(positions)
+
 def main():
     # Parse command line arguments
     ply_path = None
@@ -395,9 +472,43 @@ def main():
     
     glBindVertexArray(0)
     
-    # TODO: Gaussian splat renderer will be added here
-    # if ply_path:
-    #     splat_renderer = GaussianSplatShaderRenderer(ply_path)
+    # Create point renderer if PLY file is provided
+    point_vao = None
+    point_vbo = None
+    point_shader = None
+    point_mvp_uniform = None
+    num_points = 0
+    
+    if ply_path:
+        print("Setting up point renderer...")
+        
+        # Create point shader program
+        point_shader = create_shader_program(point_vertex_shader, point_fragment_shader)
+        point_mvp_uniform = glGetUniformLocation(point_shader, "uMVP")
+        
+        # Load PLY data
+        point_vertices, num_points = load_ply(ply_path)
+        
+        # Create point VAO and VBO
+        point_vao = glGenVertexArrays(1)
+        point_vbo = glGenBuffers(1)
+        
+        glBindVertexArray(point_vao)
+        glBindBuffer(GL_ARRAY_BUFFER, point_vbo)
+        glBufferData(GL_ARRAY_BUFFER, point_vertices.nbytes, point_vertices, GL_STATIC_DRAW)
+        
+        # Position attribute
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, None)
+        glEnableVertexAttribArray(0)
+        
+        # Color attribute
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))
+        glEnableVertexAttribArray(1)
+        
+        glBindVertexArray(0)
+        
+        # Enable point size control
+        glEnable(GL_PROGRAM_POINT_SIZE)
     
     # Create skybox if background.exr exists
     skybox_vao = None
@@ -513,9 +624,16 @@ def main():
         
         glUseProgram(0)
         
-        # TODO: Draw Gaussian splats
-        # if splat_renderer:
-        #     splat_renderer.render(camera.position, view_matrix, projection_matrix)
+        # Draw points
+        if point_shader and point_vao:
+            glUseProgram(point_shader)
+            glUniformMatrix4fv(point_mvp_uniform, 1, GL_TRUE, mvp_matrix)
+            
+            glBindVertexArray(point_vao)
+            glDrawArrays(GL_POINTS, 0, num_points)
+            glBindVertexArray(0)
+            
+            glUseProgram(0)
         
         # Swap buffers and poll events
         glfw.swap_buffers(window)
@@ -530,7 +648,13 @@ def main():
         glDeleteVertexArrays(1, [skybox_vao])
         glDeleteBuffers(1, [skybox_vbo])
         glDeleteProgram(skybox_shader)
-        glDeleteTextures(1, [skybox_texture])
+        if skybox_texture:
+            glDeleteTextures(skybox_texture)
+    
+    if point_vao:
+        glDeleteVertexArrays(1, [point_vao])
+        glDeleteBuffers(1, [point_vbo])
+        glDeleteProgram(point_shader)
     
     glfw.terminate()
 
