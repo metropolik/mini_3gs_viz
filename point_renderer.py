@@ -213,13 +213,6 @@ class PointRenderer:
         # Transfer back to CPU for rendering
         transformed_positions = cp.asnumpy(gpu_transformed_positions)
         
-        # Debug output for first frame
-        if not self._debug_printed:
-            print("=== CUSTOM CUDA KERNEL TRANSFORMATION ===")
-            print("First 3 original points:", self.original_positions[:3])
-            print("First 3 transformed points:", transformed_positions[:3])
-            self._debug_printed = True
-        
         # Create interleaved vertex data with transformed positions
         vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
         vertex_data[:, :3] = transformed_positions
