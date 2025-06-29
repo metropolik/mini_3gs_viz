@@ -52,12 +52,16 @@ class PointRenderer:
         # CPU transformation objects
         self.original_positions = None  # Original positions (CPU)
         self.colors = None              # Colors (CPU)
+        self.scales = None              # Scale vectors (CPU)
+        self.rotations = None           # Rotation quaternions (CPU)
+        self.opacity = None             # Opacity values (CPU)
         self.use_cuda = False  # Disable CUDA for now
         self._debug_printed = False  # Debug flag
         
         # CUDA kernels for transformations
         self.transform_kernel = None
         self.transform_perspective_kernel = None
+        self.covariance_kernel = None
         if CUPY_AVAILABLE:
             self._load_transform_kernel()
         else:
@@ -115,7 +119,8 @@ class PointRenderer:
                 kernel_source = f.read()
             self.transform_kernel = cp.RawKernel(kernel_source, 'transform_points')
             self.transform_perspective_kernel = cp.RawKernel(kernel_source, 'transform_points_with_perspective')
-            print("Custom transform kernels loaded successfully")
+            self.covariance_kernel = cp.RawKernel(kernel_source, 'compute_2d_covariance')
+            print("Custom transform and covariance kernels loaded successfully")
         except Exception as e:
             raise RuntimeError(f"Failed to load transform kernels: {e}")
     
@@ -126,6 +131,56 @@ class PointRenderer:
         
         # Load PLY file using Open3D tensor API
         pcd_t = o3d.t.io.read_point_cloud(self.ply_path)
+        
+        # Debug: Print all available fields in the PLY file
+        print("=== PLY FILE STRUCTURE DEBUG ===")
+        print("Available point fields:")
+        sh_fields = []
+        
+        # Get available field names by checking what's accessible
+        available_fields = []
+        test_fields = ['positions', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'scale_0', 'scale_1', 'scale_2', 
+                      'rot_0', 'rot_1', 'rot_2', 'rot_3', 'opacity']
+        
+        for field_name in test_fields:
+            try:
+                if hasattr(pcd_t.point, field_name):
+                    field_data = getattr(pcd_t.point, field_name)
+                    available_fields.append(field_name)
+                    print(f"  {field_name}: shape={field_data.shape}, dtype={field_data.dtype}")
+                    # Check for spherical harmonics fields
+                    if field_name.startswith('f_dc_') or field_name.startswith('f_rest_'):
+                        sh_fields.append(field_name)
+                elif field_name in pcd_t.point:
+                    field_data = pcd_t.point[field_name]
+                    available_fields.append(field_name)
+                    print(f"  {field_name}: shape={field_data.shape}, dtype={field_data.dtype}")
+                    # Check for spherical harmonics fields
+                    if field_name.startswith('f_dc_') or field_name.startswith('f_rest_'):
+                        sh_fields.append(field_name)
+            except:
+                continue
+        
+        # Try to get additional field names that might exist
+        try:
+            # Some versions might have a different way to access field names
+            if hasattr(pcd_t.point, 'get_dtype'):
+                print("Point cloud dtype info:", pcd_t.point.get_dtype())
+        except:
+            pass
+        
+        if sh_fields:
+            print(f"Found {len(sh_fields)} spherical harmonics fields: {sh_fields}")
+        
+        # Check for common Gaussian splatting fields
+        common_fields = ['scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3', 'opacity']
+        missing_fields = [f for f in common_fields if f not in available_fields]
+        if missing_fields:
+            print(f"Missing common Gaussian splatting fields: {missing_fields}")
+        else:
+            print("All common Gaussian splatting fields are present!")
+        
+        print("=== END PLY STRUCTURE DEBUG ===")
         
         # Extract positions (x, y, z)
         positions = None
@@ -159,11 +214,70 @@ class PointRenderer:
             print("No colors found, using white")
             colors = np.ones((len(positions), 3))
         
+        # Extract scale vectors (scale_0, scale_1, scale_2)
+        scales = None
+        if 'scale_0' in pcd_t.point and 'scale_1' in pcd_t.point and 'scale_2' in pcd_t.point:
+            print("Found scale vectors")
+            scale_0 = pcd_t.point['scale_0'].numpy()
+            scale_1 = pcd_t.point['scale_1'].numpy()
+            scale_2 = pcd_t.point['scale_2'].numpy()
+            scales = np.stack([scale_0, scale_1, scale_2], axis=-1)
+            scales = np.squeeze(scales)
+            if scales.ndim == 3 and scales.shape[1] == 1:
+                scales = scales.squeeze(1)
+            print(f"Scale data shape: {scales.shape}, range: [{scales.min():.4f}, {scales.max():.4f}]")
+        else:
+            print("No scale vectors found, using default scales")
+            scales = np.ones((len(positions), 3)) * 0.01  # Small default scale
+        
+        # Extract rotation quaternions (rot_0, rot_1, rot_2, rot_3)
+        rotations = None
+        if 'rot_0' in pcd_t.point and 'rot_1' in pcd_t.point and 'rot_2' in pcd_t.point and 'rot_3' in pcd_t.point:
+            print("Found rotation quaternions")
+            rot_0 = pcd_t.point['rot_0'].numpy()
+            rot_1 = pcd_t.point['rot_1'].numpy()
+            rot_2 = pcd_t.point['rot_2'].numpy()
+            rot_3 = pcd_t.point['rot_3'].numpy()
+            rotations = np.stack([rot_0, rot_1, rot_2, rot_3], axis=-1)
+            rotations = np.squeeze(rotations)
+            if rotations.ndim == 3 and rotations.shape[1] == 1:
+                rotations = rotations.squeeze(1)
+            print(f"Rotation data shape: {rotations.shape}, range: [{rotations.min():.4f}, {rotations.max():.4f}]")
+        else:
+            print("No rotation quaternions found, using identity rotations")
+            rotations = np.zeros((len(positions), 4))
+            rotations[:, 0] = 1.0  # w=1, x=y=z=0 for identity quaternion
+        
+        # Extract opacity values
+        opacity = None
+        if 'opacity' in pcd_t.point:
+            print("Found opacity values")
+            opacity = pcd_t.point['opacity'].numpy()
+            opacity = np.squeeze(opacity)
+            if opacity.ndim == 2 and opacity.shape[1] == 1:
+                opacity = opacity.squeeze(1)
+            print(f"Opacity data shape: {opacity.shape}, range: [{opacity.min():.4f}, {opacity.max():.4f}]")
+        else:
+            print("No opacity values found, using full opacity")
+            opacity = np.ones(len(positions))
+        
         self.num_points = len(positions)
         
-        # Store original positions and colors for CPU transformations
+        # Store all Gaussian splatting data for CPU/GPU transformations
         self.original_positions = positions.astype(np.float32)
         self.colors = colors.astype(np.float32)
+        self.scales = scales.astype(np.float32)
+        self.rotations = rotations.astype(np.float32)
+        self.opacities = opacity.astype(np.float32)
+        
+        # Debug summary of loaded Gaussian splatting data
+        print("=== GAUSSIAN SPLATTING DATA SUMMARY ===")
+        print(f"Positions: {self.original_positions.shape}")
+        print(f"Colors: {self.colors.shape}")
+        print(f"Scales: {self.scales.shape}")
+        print(f"Rotations: {self.rotations.shape}")
+        print(f"Opacities: {self.opacities.shape}")
+        print("=== END DATA SUMMARY ===")
         
         # Create initial interleaved vertex data (will be updated with transformed data)
         vertex_data = np.zeros((len(positions), 6), dtype=np.float32)
@@ -220,11 +334,29 @@ class PointRenderer:
         # Apply sorting to view space coordinates
         gpu_view_space_sorted = gpu_view_space[sorted_indices]
         
-        # Apply sorting to colors on GPU
+        # Apply sorting to all Gaussian attributes on GPU
         gpu_colors = cp.asarray(self.colors)
         gpu_colors_sorted = gpu_colors[sorted_indices]
         
-        # Second transformation: Apply Projection matrix with perspective division
+        gpu_scales = cp.asarray(self.scales)
+        gpu_scales_sorted = gpu_scales[sorted_indices]
+        
+        gpu_rotations = cp.asarray(self.rotations)
+        gpu_rotations_sorted = gpu_rotations[sorted_indices]
+        
+        gpu_opacities = cp.asarray(self.opacities)
+        gpu_opacities_sorted = gpu_opacities[sorted_indices]
+        
+        # Compute 2D covariance matrices and quad parameters
+        gpu_cov2d = cp.zeros((self.num_points, 3), dtype=cp.float32)  # Upper triangle of 2x2 matrix
+        gpu_quad_params = cp.zeros((self.num_points, 4), dtype=cp.float32)  # center_x, center_y, radius_x, radius_y
+        gpu_visibility_mask = cp.zeros(self.num_points, dtype=cp.int32)
+        
+        self.covariance_kernel((grid_size,), (block_size,), 
+                             (gpu_view_space_sorted, gpu_scales_sorted, gpu_rotations_sorted,
+                              gpu_mv, gpu_p, gpu_cov2d, gpu_quad_params, gpu_visibility_mask, self.num_points))
+        
+        # Second transformation: Apply Projection matrix with perspective division (for point centers)
         gpu_transformed_positions = cp.zeros((self.num_points, 3), dtype=cp.float32)
         self.transform_perspective_kernel((grid_size,), (block_size,), 
                                         (gpu_p, gpu_view_space_sorted, gpu_transformed_positions, self.num_points))
@@ -232,14 +364,20 @@ class PointRenderer:
         # Transfer back to CPU for rendering
         transformed_positions = cp.asnumpy(gpu_transformed_positions)
         colors_sorted = cp.asnumpy(gpu_colors_sorted)
+        cov2d_data = cp.asnumpy(gpu_cov2d)
+        quad_params = cp.asnumpy(gpu_quad_params)
+        visibility_mask = cp.asnumpy(gpu_visibility_mask)
         
         # Debug output for first frame
         if not self._debug_printed:
-            print("=== TWO-STAGE CUDA KERNEL TRANSFORMATION (MV + P) WITH DEPTH SORTING ===")
+            print("=== GAUSSIAN SPLATTING PIPELINE WITH 2D COVARIANCE ===")
             print("First 3 original points:", self.original_positions[:3])
             print("First 3 view-space points (unsorted):", cp.asnumpy(gpu_view_space[:3]))
             print("First 3 view-space z-values (sorted):", cp.asnumpy(view_z[sorted_indices[:3]]))
             print("First 3 transformed points (sorted):", transformed_positions[:3])
+            print("First 3 2D covariance matrices:", cov2d_data[:3])
+            print("First 3 quad parameters (center_x, center_y, radius_x, radius_y):", quad_params[:3])
+            print("Visible Gaussians:", visibility_mask.sum(), "/", len(visibility_mask))
             print("Sorting indices (first 10):", cp.asnumpy(sorted_indices[:10]))
             self._debug_printed = True
         
