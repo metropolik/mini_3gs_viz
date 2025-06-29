@@ -252,7 +252,8 @@ def main():
         grid_renderer.render(mvp_matrix)
         
         # Draw points
-        point_renderer.render(mvp_matrix)
+        mv_matrix = view_matrix  # Model is identity, so MV = V
+        point_renderer.render(mv_matrix, projection_matrix)
         
         # Swap buffers and poll events
         glfw.swap_buffers(window)

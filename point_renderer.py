@@ -55,8 +55,9 @@ class PointRenderer:
         self.use_cuda = False  # Disable CUDA for now
         self._debug_printed = False  # Debug flag
         
-        # CUDA kernel for transformations
+        # CUDA kernels for transformations
         self.transform_kernel = None
+        self.transform_perspective_kernel = None
         if CUPY_AVAILABLE:
             self._load_transform_kernel()
         else:
@@ -108,14 +109,15 @@ class PointRenderer:
         # No uniforms needed for pre-transformed vertices
     
     def _load_transform_kernel(self):
-        """Load the custom CUDA transform kernel"""
+        """Load the custom CUDA transform kernels"""
         try:
             with open('transform_kernel.cu', 'r') as f:
                 kernel_source = f.read()
             self.transform_kernel = cp.RawKernel(kernel_source, 'transform_points')
-            print("Custom transform kernel loaded successfully")
+            self.transform_perspective_kernel = cp.RawKernel(kernel_source, 'transform_points_with_perspective')
+            print("Custom transform kernels loaded successfully")
         except Exception as e:
-            raise RuntimeError(f"Failed to load transform kernel: {e}")
+            raise RuntimeError(f"Failed to load transform kernels: {e}")
     
     
     def _load_ply(self):
@@ -187,31 +189,45 @@ class PointRenderer:
         
         glBindVertexArray(0)
     
-    def render(self, mvp_matrix):
-        """Render the points with given MVP matrix using CuPy GPU transformation"""
+    def render(self, mv_matrix, p_matrix):
+        """Render the points with given MV and P matrices using CuPy GPU transformation"""
         if not self.shader_program or not self.vao:
             return
         
-        # Transform points using custom CUDA kernel
+        # Transform points using custom CUDA kernel (two-stage transformation)
         # Add homogeneous coordinate (w=1) to all points
         homogeneous_positions = np.ones((self.num_points, 4), dtype=np.float32)
         homogeneous_positions[:, :3] = self.original_positions
         
         # Transfer data to GPU
         gpu_homogeneous = cp.asarray(homogeneous_positions)
-        gpu_mvp = cp.asarray(mvp_matrix.astype(np.float32))
+        gpu_mv = cp.asarray(mv_matrix.astype(np.float32))
+        gpu_p = cp.asarray(p_matrix.astype(np.float32))
         
-        # Allocate output buffer for transformed positions (3 components per point)
-        gpu_transformed_positions = cp.zeros((self.num_points, 3), dtype=cp.float32)
+        # First transformation: Apply Model-View matrix (keep homogeneous coordinates)
+        gpu_view_space = cp.zeros((self.num_points, 4), dtype=cp.float32)  # Keep homogeneous for intermediate
         
-        # Launch custom CUDA kernel (includes perspective division)
+        # Launch first transform kernel (MV transformation, no perspective division)
         block_size = 256
         grid_size = (self.num_points + block_size - 1) // block_size
         self.transform_kernel((grid_size,), (block_size,), 
-                            (gpu_mvp, gpu_homogeneous, gpu_transformed_positions, self.num_points))
+                            (gpu_mv, gpu_homogeneous, gpu_view_space, self.num_points))
+        
+        # Second transformation: Apply Projection matrix with perspective division
+        gpu_transformed_positions = cp.zeros((self.num_points, 3), dtype=cp.float32)
+        self.transform_perspective_kernel((grid_size,), (block_size,), 
+                                        (gpu_p, gpu_view_space, gpu_transformed_positions, self.num_points))
         
         # Transfer back to CPU for rendering
         transformed_positions = cp.asnumpy(gpu_transformed_positions)
+        
+        # Debug output for first frame
+        if not self._debug_printed:
+            print("=== TWO-STAGE CUDA KERNEL TRANSFORMATION (MV + P) ===")
+            print("First 3 original points:", self.original_positions[:3])
+            print("First 3 view-space points:", cp.asnumpy(gpu_view_space[:3]))
+            print("First 3 transformed points:", transformed_positions[:3])
+            self._debug_printed = True
         
         # Create interleaved vertex data with transformed positions
         vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
