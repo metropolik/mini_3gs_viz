@@ -4,25 +4,29 @@ from math import sin, cos, radians
 import os
 import open3d as o3d
 import ctypes
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    CUPY_AVAILABLE = False
+    print("CuPy not available, falling back to CPU transformations")
 
 class PointRenderer:
     def __init__(self, ply_path=None):
         """Initialize point renderer with optional PLY file"""
         self.ply_path = ply_path
         
-        # Shader source code
+        # Shader source code - now expects pre-transformed vertices
         self.vertex_shader_source = """
         #version 330 core
         layout (location = 0) in vec3 aPos;
         layout (location = 1) in vec3 aColor;
         
-        uniform mat4 uMVP;
-        
         out vec3 color;
         
         void main()
         {
-            gl_Position = uMVP * vec4(aPos, 1.0);
+            gl_Position = vec4(aPos, 1.0);
             gl_PointSize = 3.0;
             color = aColor;
         }
@@ -43,8 +47,13 @@ class PointRenderer:
         self.shader_program = None
         self.vao = None
         self.vbo = None
-        self.mvp_uniform = None
         self.num_points = 0
+        
+        # CPU transformation objects
+        self.original_positions = None  # Original positions (CPU)
+        self.colors = None              # Colors (CPU)
+        self.use_cuda = False  # Disable CUDA for now
+        self._debug_printed = False  # Debug flag
         
         # Initialize if PLY file is provided
         if ply_path and os.path.exists(ply_path):
@@ -89,8 +98,8 @@ class PointRenderer:
         glDeleteShader(vertex_shader)
         glDeleteShader(fragment_shader)
         
-        # Get uniform location
-        self.mvp_uniform = glGetUniformLocation(self.shader_program, "uMVP")
+        # No uniforms needed for pre-transformed vertices
+    
     
     def _load_ply(self):
         """Load PLY file and extract positions and colors"""
@@ -131,13 +140,17 @@ class PointRenderer:
             print("No colors found, using white")
             colors = np.ones((len(positions), 3))
         
-        # Create interleaved vertex data (position + color)
+        self.num_points = len(positions)
+        
+        # Store original positions and colors for CPU transformations
+        self.original_positions = positions.astype(np.float32)
+        self.colors = colors.astype(np.float32)
+        
+        # Create initial interleaved vertex data (will be updated with transformed data)
         vertex_data = np.zeros((len(positions), 6), dtype=np.float32)
         vertex_data[:, :3] = positions
         vertex_data[:, 3:6] = colors
         vertex_data = vertex_data.flatten()
-        
-        self.num_points = len(positions)
         
         # Create VAO and VBO
         self.vao = glGenVertexArrays(1)
@@ -145,7 +158,7 @@ class PointRenderer:
         
         glBindVertexArray(self.vao)
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_STATIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)  # Dynamic for updates
         
         # Position attribute
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, None)
@@ -158,12 +171,45 @@ class PointRenderer:
         glBindVertexArray(0)
     
     def render(self, mvp_matrix):
-        """Render the points with given MVP matrix"""
+        """Render the points with given MVP matrix using CPU transformation"""
         if not self.shader_program or not self.vao:
             return
         
+        # Transform points using NumPy on CPU
+        # Add homogeneous coordinate (w=1) to all points
+        homogeneous_positions = np.ones((self.num_points, 4), dtype=np.float32)
+        homogeneous_positions[:, :3] = self.original_positions
+        
+        # Apply MVP transformation to all points at once
+        transformed_homogeneous = (mvp_matrix @ homogeneous_positions.T).T
+        
+        # Perform perspective division
+        w_values = transformed_homogeneous[:, 3]
+        # Avoid division by zero
+        valid_w = np.where(np.abs(w_values) < 1e-8, 1e-8, w_values)
+        
+        transformed_positions = transformed_homogeneous[:, :3] / valid_w.reshape(-1, 1)
+        
+        # Debug output for first frame
+        if not self._debug_printed:
+            print("=== CPU NUMPY TRANSFORMATION DEBUG ===")
+            print("First 3 original points:", self.original_positions[:3])
+            print("First 3 transformed points:", transformed_positions[:3])
+            print("First 3 w values:", w_values[:3])
+            self._debug_printed = True
+        
+        # Create interleaved vertex data with transformed positions
+        vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
+        vertex_data[:, :3] = transformed_positions
+        vertex_data[:, 3:6] = self.colors
+        vertex_data = vertex_data.flatten()
+        
+        # Update VBO with transformed data
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_data.nbytes, vertex_data)
+        
+        # Render using shader (no MVP uniform needed)
         glUseProgram(self.shader_program)
-        glUniformMatrix4fv(self.mvp_uniform, 1, GL_TRUE, mvp_matrix)
         
         glBindVertexArray(self.vao)
         glDrawArrays(GL_POINTS, 0, self.num_points)
