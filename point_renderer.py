@@ -27,7 +27,7 @@ class PointRenderer:
         void main()
         {
             gl_Position = vec4(aPos, 1.0);
-            gl_PointSize = 3.0;
+            gl_PointSize = 10.0;
             color = aColor;
         }
         """
@@ -213,26 +213,40 @@ class PointRenderer:
         self.transform_kernel((grid_size,), (block_size,), 
                             (gpu_mv, gpu_homogeneous, gpu_view_space, self.num_points))
         
+        # Sort points by depth (z-coordinate in view space, farthest to closest for proper blending)
+        view_z = gpu_view_space[:, 2]  # Extract z-coordinates in view space
+        sorted_indices = cp.argsort(-view_z)  # Sort by negative z (farthest to closest)
+        
+        # Apply sorting to view space coordinates
+        gpu_view_space_sorted = gpu_view_space[sorted_indices]
+        
+        # Apply sorting to colors on GPU
+        gpu_colors = cp.asarray(self.colors)
+        gpu_colors_sorted = gpu_colors[sorted_indices]
+        
         # Second transformation: Apply Projection matrix with perspective division
         gpu_transformed_positions = cp.zeros((self.num_points, 3), dtype=cp.float32)
         self.transform_perspective_kernel((grid_size,), (block_size,), 
-                                        (gpu_p, gpu_view_space, gpu_transformed_positions, self.num_points))
+                                        (gpu_p, gpu_view_space_sorted, gpu_transformed_positions, self.num_points))
         
         # Transfer back to CPU for rendering
         transformed_positions = cp.asnumpy(gpu_transformed_positions)
+        colors_sorted = cp.asnumpy(gpu_colors_sorted)
         
         # Debug output for first frame
         if not self._debug_printed:
-            print("=== TWO-STAGE CUDA KERNEL TRANSFORMATION (MV + P) ===")
+            print("=== TWO-STAGE CUDA KERNEL TRANSFORMATION (MV + P) WITH DEPTH SORTING ===")
             print("First 3 original points:", self.original_positions[:3])
-            print("First 3 view-space points:", cp.asnumpy(gpu_view_space[:3]))
-            print("First 3 transformed points:", transformed_positions[:3])
+            print("First 3 view-space points (unsorted):", cp.asnumpy(gpu_view_space[:3]))
+            print("First 3 view-space z-values (sorted):", cp.asnumpy(view_z[sorted_indices[:3]]))
+            print("First 3 transformed points (sorted):", transformed_positions[:3])
+            print("Sorting indices (first 10):", cp.asnumpy(sorted_indices[:10]))
             self._debug_printed = True
         
-        # Create interleaved vertex data with transformed positions
+        # Create interleaved vertex data with transformed positions and sorted colors
         vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
         vertex_data[:, :3] = transformed_positions
-        vertex_data[:, 3:6] = self.colors
+        vertex_data[:, 3:6] = colors_sorted
         vertex_data = vertex_data.flatten()
         
         # Update VBO with transformed data
