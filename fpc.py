@@ -1,15 +1,33 @@
 import glfw
 from OpenGL.GL import *
-from OpenGL.GLU import *
 import numpy as np
-from math import sin, cos, radians, pi, atan2, sqrt
-import OpenEXR
-import Imath
-import array
+from math import sin, cos, radians, pi, tan
 import os
 import sys
-from gaussian_splat_renderer import GaussianSplatRenderer
-from gaussian_splat_as_points_renderer import GaussianSplatPointsRenderer
+
+# Vertex shader for grid
+grid_vertex_shader = """
+#version 330 core
+layout (location = 0) in vec3 aPos;
+
+uniform mat4 uMVP;
+
+void main()
+{
+    gl_Position = uMVP * vec4(aPos, 1.0);
+}
+"""
+
+# Fragment shader for grid
+grid_fragment_shader = """
+#version 330 core
+out vec4 FragColor;
+
+void main()
+{
+    FragColor = vec4(0.0, 0.8, 0.0, 1.0);  // Green color
+}
+"""
 
 class FirstPersonCamera:
     def __init__(self, position=(0, 1.6, 0), yaw=-90.0, pitch=0.0):
@@ -23,28 +41,39 @@ class FirstPersonCamera:
         self.first_mouse = True
         
     def get_view_matrix(self):
+        """Get view matrix as numpy array"""
         # Calculate direction vector
         front_x = cos(radians(self.yaw)) * cos(radians(self.pitch))
         front_y = sin(radians(self.pitch))
         front_z = sin(radians(self.yaw)) * cos(radians(self.pitch))
         
-        # Look at point
-        center = [
-            self.position[0] + front_x,
-            self.position[1] + front_y,
-            self.position[2] + front_z
-        ]
+        # Normalize direction vector
+        front = np.array([front_x, front_y, front_z])
+        front = front / np.linalg.norm(front)
         
-        gluLookAt(
-            self.position[0], self.position[1], self.position[2],
-            center[0], center[1], center[2],
-            0, 1, 0
-        )
+        # Calculate right and up vectors
+        world_up = np.array([0.0, 1.0, 0.0])
+        right = np.cross(front, world_up)
+        right = right / np.linalg.norm(right)
+        up = np.cross(right, front)
+        
+        # Create view matrix (lookAt matrix)
+        position = np.array(self.position)
+        
+        # Build the view matrix
+        view_matrix = np.array([
+            [right[0], right[1], right[2], -np.dot(right, position)],
+            [up[0], up[1], up[2], -np.dot(up, position)],
+            [-front[0], -front[1], -front[2], np.dot(front, position)],
+            [0.0, 0.0, 0.0, 1.0]
+        ], dtype=np.float32)
+        
+        return view_matrix
         
     def process_keyboard(self, window, delta_time):
         velocity = self.speed * delta_time
         
-        # Calculate front and right vectors (including vertical component for front)
+        # Calculate front and right vectors
         front_x = cos(radians(self.yaw)) * cos(radians(self.pitch))
         front_y = sin(radians(self.pitch))
         front_z = sin(radians(self.yaw)) * cos(radians(self.pitch))
@@ -93,118 +122,68 @@ class FirstPersonCamera:
         if self.pitch < -89.0:
             self.pitch = -89.0
 
-def draw_grid(size=100, spacing=1.0):
-    glBegin(GL_LINES)
-    glColor3f(0.0, 0.8, 0.0)  # Green color
+def perspective(fovy, aspect, near, far):
+    """Create a perspective projection matrix"""
+    f = 1.0 / tan(radians(fovy) / 2.0)
+    nf = 1.0 / (near - far)
     
-    # Draw lines parallel to X axis
+    result = np.zeros((4, 4), dtype=np.float32)
+    result[0, 0] = f / aspect
+    result[1, 1] = f
+    result[2, 2] = (far + near) * nf
+    result[2, 3] = 2.0 * far * near * nf
+    result[3, 2] = -1.0
+    
+    return result
+
+def compile_shader(source, shader_type):
+    """Compile a shader from source"""
+    shader = glCreateShader(shader_type)
+    glShaderSource(shader, source)
+    glCompileShader(shader)
+    
+    if not glGetShaderiv(shader, GL_COMPILE_STATUS):
+        error = glGetShaderInfoLog(shader).decode()
+        raise RuntimeError(f"Shader compilation failed: {error}")
+    
+    return shader
+
+def create_shader_program(vertex_source, fragment_source):
+    """Create a shader program from vertex and fragment shader sources"""
+    vertex_shader = compile_shader(vertex_source, GL_VERTEX_SHADER)
+    fragment_shader = compile_shader(fragment_source, GL_FRAGMENT_SHADER)
+    
+    program = glCreateProgram()
+    glAttachShader(program, vertex_shader)
+    glAttachShader(program, fragment_shader)
+    glLinkProgram(program)
+    
+    if not glGetProgramiv(program, GL_LINK_STATUS):
+        error = glGetProgramInfoLog(program).decode()
+        raise RuntimeError(f"Program linking failed: {error}")
+    
+    glDeleteShader(vertex_shader)
+    glDeleteShader(fragment_shader)
+    
+    return program
+
+def create_grid(size=100, spacing=1.0):
+    """Create grid vertex data"""
+    vertices = []
+    
+    # Lines parallel to X axis
     for i in range(-size, size + 1, int(spacing)):
         z = float(i)
-        glVertex3f(-size, 0, z)
-        glVertex3f(size, 0, z)
-        
-    # Draw lines parallel to Z axis
+        vertices.extend([-size, 0.0, z])  # Start point
+        vertices.extend([size, 0.0, z])   # End point
+    
+    # Lines parallel to Z axis
     for i in range(-size, size + 1, int(spacing)):
         x = float(i)
-        glVertex3f(x, 0, -size)
-        glVertex3f(x, 0, size)
-        
-    glEnd()
-
-def load_exr_texture(filename):
-    cache_file = filename.replace('.exr', '_cache.npz')
+        vertices.extend([x, 0.0, -size])  # Start point
+        vertices.extend([x, 0.0, size])   # End point
     
-    # Check if cache exists
-    if os.path.exists(cache_file):
-        print(f"Loading cached texture from {cache_file}")
-        cache = np.load(cache_file)
-        texture_data = cache['texture_data']
-        width = cache['width']
-        height = cache['height']
-    else:
-        print(f"Loading EXR file {filename}")
-        # Open EXR file
-        exr_file = OpenEXR.InputFile(filename)
-        header = exr_file.header()
-        
-        # Get dimensions
-        dw = header['dataWindow']
-        width = dw.max.x - dw.min.x + 1
-        height = dw.max.y - dw.min.y + 1
-        
-        # Read channels
-        FLOAT = Imath.PixelType(Imath.PixelType.FLOAT)
-        r_str = exr_file.channel('R', FLOAT)
-        g_str = exr_file.channel('G', FLOAT)
-        b_str = exr_file.channel('B', FLOAT)
-        
-        # Convert to numpy arrays efficiently
-        r = np.frombuffer(r_str, dtype=np.float32).reshape(height, width)
-        g = np.frombuffer(g_str, dtype=np.float32).reshape(height, width)
-        b = np.frombuffer(b_str, dtype=np.float32).reshape(height, width)
-        
-        # Stack into RGB texture
-        texture_data = np.stack([r, g, b], axis=2)
-        
-        # Save cache
-        print(f"Saving cache to {cache_file}")
-        np.savez_compressed(cache_file, texture_data=texture_data, width=width, height=height)
-    
-    # Create OpenGL texture
-    texture_id = glGenTextures(1)
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    
-    # Set texture parameters
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-    
-    # Upload texture data
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB32F, width, height, 0, GL_RGB, GL_FLOAT, texture_data)
-    
-    return texture_id
-
-def draw_skybox(texture_id, segments=64):
-    glEnable(GL_TEXTURE_2D)
-    glBindTexture(GL_TEXTURE_2D, texture_id)
-    glColor3f(1.0, 1.0, 1.0)
-    
-    # Draw sphere inside-out for skybox
-    radius = 500.0
-    
-    for lat in range(segments):
-        lat0 = pi * (-0.5 + float(lat) / segments)
-        lat1 = pi * (-0.5 + float(lat + 1) / segments)
-        
-        glBegin(GL_QUAD_STRIP)
-        for lon in range(segments + 1):
-            lon_angle = 2 * pi * float(lon) / segments
-            
-            # First vertex
-            x0 = cos(lat0) * cos(lon_angle)
-            y0 = sin(lat0)
-            z0 = cos(lat0) * sin(lon_angle)
-            
-            # Second vertex
-            x1 = cos(lat1) * cos(lon_angle)
-            y1 = sin(lat1)
-            z1 = cos(lat1) * sin(lon_angle)
-            
-            # Texture coordinates (equirectangular mapping)
-            u = float(lon) / segments
-            v0 = 1.0 - (0.5 + lat0 / pi)
-            v1 = 1.0 - (0.5 + lat1 / pi)
-            
-            glTexCoord2f(u, v0)
-            glVertex3f(x0 * radius, y0 * radius, z0 * radius)
-            
-            glTexCoord2f(u, v1)
-            glVertex3f(x1 * radius, y1 * radius, z1 * radius)
-            
-        glEnd()
-    
-    glDisable(GL_TEXTURE_2D)
+    return np.array(vertices, dtype=np.float32)
 
 def main():
     # Parse command line arguments
@@ -218,6 +197,11 @@ def main():
     # Initialize GLFW
     if not glfw.init():
         return
+    
+    # Request OpenGL 3.3 core profile
+    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
     
     # Create window
     width, height = 3600, 2000
@@ -245,23 +229,37 @@ def main():
     glEnable(GL_DEPTH_TEST)
     glClearColor(0.1, 0.1, 0.1, 1.0)
     
-    # Set up perspective projection
-    glMatrixMode(GL_PROJECTION)
-    glLoadIdentity()
-    gluPerspective(45, width/height, 0.1, 1000.0)
-    glMatrixMode(GL_MODELVIEW)
-    
     # Create camera
     camera = FirstPersonCamera()
     
-    # Load background texture
-    background_texture = load_exr_texture('background.exr')
+    # Create shader program for grid
+    grid_shader = create_shader_program(grid_vertex_shader, grid_fragment_shader)
+    mvp_uniform = glGetUniformLocation(grid_shader, "uMVP")
     
-    # Load Gaussian splat model if provided
-    splat_renderer = None
-    if ply_path:
-        splat_renderer = GaussianSplatRenderer(ply_path)
-        #splat_renderer = GaussianSplatPointsRenderer(ply_path)
+    # Create grid VAO and VBO
+    grid_vertices = create_grid()
+    num_grid_vertices = len(grid_vertices) // 3
+    
+    grid_vao = glGenVertexArrays(1)
+    grid_vbo = glGenBuffers(1)
+    
+    glBindVertexArray(grid_vao)
+    glBindBuffer(GL_ARRAY_BUFFER, grid_vbo)
+    glBufferData(GL_ARRAY_BUFFER, grid_vertices.nbytes, grid_vertices, GL_STATIC_DRAW)
+    
+    # Position attribute
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * 4, None)
+    glEnableVertexAttribArray(0)
+    
+    glBindVertexArray(0)
+    
+    # TODO: Gaussian splat renderer will be added here
+    # if ply_path:
+    #     splat_renderer = GaussianSplatShaderRenderer(ply_path)
+    
+    # TODO: Skybox renderer will be added here
+    # if os.path.exists('background.exr'):
+    #     skybox_renderer = SkyboxShaderRenderer()
     
     # Mouse callback
     def mouse_callback(window, xpos, ypos):
@@ -269,8 +267,8 @@ def main():
     
     # Scroll callback for speed adjustment
     def scroll_callback(window, xoffset, yoffset):
-        camera.speed *= 1.1 ** yoffset  # Increase/decrease by 10% per scroll
-        camera.speed = max(0.1, min(camera.speed, 50.0))  # Clamp between 0.1 and 50
+        camera.speed *= 1.1 ** yoffset
+        camera.speed = max(0.1, min(camera.speed, 50.0))
         print(f"Movement speed: {camera.speed:.1f}")
     
     glfw.set_cursor_pos_callback(window, mouse_callback)
@@ -295,28 +293,37 @@ def main():
         # Clear screen
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         
-        # Set view matrix
-        glLoadIdentity()
-        camera.get_view_matrix()
-        
-        # Draw skybox first (disable depth writing)
-        glDepthMask(GL_FALSE)
-        draw_skybox(background_texture)
-        glDepthMask(GL_TRUE)
+        # Calculate matrices
+        view_matrix = camera.get_view_matrix()
+        projection_matrix = perspective(45.0, width/height, 0.1, 1000.0)
+        mvp_matrix = projection_matrix @ view_matrix  # Model is identity
         
         # Draw grid
-        draw_grid()
+        glUseProgram(grid_shader)
+        glUniformMatrix4fv(mvp_uniform, 1, GL_TRUE, mvp_matrix)
         
-        # Draw Gaussian splats if loaded
-        if splat_renderer:
-            # Get current matrices for proper rendering
-            projection_matrix = glGetDoublev(GL_PROJECTION_MATRIX)
-            modelview_matrix = glGetDoublev(GL_MODELVIEW_MATRIX)
-            splat_renderer.render(camera.position, modelview_matrix, projection_matrix)
+        glBindVertexArray(grid_vao)
+        glDrawArrays(GL_LINES, 0, num_grid_vertices)
+        glBindVertexArray(0)
+        
+        glUseProgram(0)
+        
+        # TODO: Draw skybox
+        # if skybox_renderer:
+        #     skybox_renderer.render(view_matrix, projection_matrix)
+        
+        # TODO: Draw Gaussian splats
+        # if splat_renderer:
+        #     splat_renderer.render(camera.position, view_matrix, projection_matrix)
         
         # Swap buffers and poll events
         glfw.swap_buffers(window)
         glfw.poll_events()
+    
+    # Cleanup
+    glDeleteVertexArrays(1, [grid_vao])
+    glDeleteBuffers(1, [grid_vbo])
+    glDeleteProgram(grid_shader)
     
     glfw.terminate()
 
