@@ -190,17 +190,56 @@ class PointRenderer:
         
         transformed_positions = transformed_homogeneous[:, :3] / valid_w.reshape(-1, 1)
         
+        # Use CuPy for transformation if available, otherwise use NumPy
+        if CUPY_AVAILABLE:
+            # Transfer data to GPU
+            gpu_homogeneous = cp.asarray(homogeneous_positions)
+            gpu_mvp = cp.asarray(mvp_matrix)
+            
+            # Apply MVP transformation on GPU
+            gpu_transformed_homogeneous = (gpu_mvp @ gpu_homogeneous.T).T
+            
+            # Perform perspective division on GPU
+            gpu_w_values = gpu_transformed_homogeneous[:, 3]
+            gpu_valid_w = cp.where(cp.abs(gpu_w_values) < 1e-8, 1e-8, gpu_w_values)
+            gpu_transformed_positions = gpu_transformed_homogeneous[:, :3] / gpu_valid_w.reshape(-1, 1)
+            
+            # Transfer back to CPU for rendering
+            final_transformed_positions = cp.asnumpy(gpu_transformed_positions)
+            final_w_values = cp.asnumpy(gpu_w_values)
+            
+            # Keep NumPy calculation for comparison (optional)
+            position_diff = np.abs(transformed_positions - final_transformed_positions)
+            max_position_diff = np.max(position_diff)
+            w_diff = np.abs(w_values - final_w_values)
+            max_w_diff = np.max(w_diff)
+        else:
+            # Use NumPy results as primary
+            final_transformed_positions = transformed_positions
+            final_w_values = w_values
+        
         # Debug output for first frame
         if not self._debug_printed:
-            print("=== CPU NUMPY TRANSFORMATION DEBUG ===")
-            print("First 3 original points:", self.original_positions[:3])
-            print("First 3 transformed points:", transformed_positions[:3])
-            print("First 3 w values:", w_values[:3])
+            if CUPY_AVAILABLE:
+                print("=== USING CUPY TRANSFORMATION ===")
+                print("First 3 original points:", self.original_positions[:3])
+                print("First 3 CuPy transformed points:", final_transformed_positions[:3])
+                print("First 3 CuPy w values:", final_w_values[:3])
+                print(f"NumPy vs CuPy max position difference: {max_position_diff}")
+                print(f"NumPy vs CuPy max w difference: {max_w_diff}")
+                print(f"Results match: {max_position_diff < 1e-5 and max_w_diff < 1e-5}")
+            else:
+                print("=== USING NUMPY TRANSFORMATION ===")
+                print("First 3 original points:", self.original_positions[:3])
+                print("First 3 transformed points:", final_transformed_positions[:3])
+                print("First 3 w values:", final_w_values[:3])
+                print("CuPy not available, using NumPy")
+            
             self._debug_printed = True
         
-        # Create interleaved vertex data with transformed positions
+        # Create interleaved vertex data with final transformed positions
         vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
-        vertex_data[:, :3] = transformed_positions
+        vertex_data[:, :3] = final_transformed_positions
         vertex_data[:, 3:6] = self.colors
         vertex_data = vertex_data.flatten()
         
