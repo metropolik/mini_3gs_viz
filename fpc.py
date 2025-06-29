@@ -10,7 +10,7 @@ from point_renderer import PointRenderer
 
 
 class FirstPersonCamera:
-    def __init__(self, position=(0, 1.6, 0), yaw=-90.0, pitch=0.0):
+    def __init__(self, position=(0, 1.6, 20), yaw=-90.0, pitch=0.0):
         self.position = list(position)
         self.yaw = yaw
         self.pitch = pitch

@@ -1,0 +1,1 @@
+- Never try to execute fpc.py yourself. You are being run in wsl but I'm executing this in windows. So you can't reach it and will find wrong errors, that arent errors.

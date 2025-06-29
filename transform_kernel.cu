@@ -106,6 +106,11 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     // Cull if behind camera (z > 0 in view space)
     if (vz > 0.0f) {
         visibility_mask[idx] = 0;
+        // Initialize quad params to zero for culled points
+        quad_params[quad_offset + 0] = 0.0f;
+        quad_params[quad_offset + 1] = 0.0f;
+        quad_params[quad_offset + 2] = 0.0f;
+        quad_params[quad_offset + 3] = 0.0f;
         return;
     }
     
@@ -181,6 +186,11 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     if (discriminant < 0.0f) {
         // Degenerate case, mark as invisible
         visibility_mask[idx] = 0;
+        // Initialize quad params to zero
+        quad_params[quad_offset + 0] = 0.0f;
+        quad_params[quad_offset + 1] = 0.0f;
+        quad_params[quad_offset + 2] = 0.0f;
+        quad_params[quad_offset + 3] = 0.0f;
         return;
     }
     
@@ -192,9 +202,21 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float radius_x_pixels = 3.0f * sqrtf(fmaxf(lambda1, 1e-6f));
     float radius_y_pixels = 3.0f * sqrtf(fmaxf(lambda2, 1e-6f));
     
-    // Cull if quad would be too small (less than 1 pixel)
-    if (radius_x_pixels < 1.0f || radius_y_pixels < 1.0f) {
+    // DEBUG: Print first gaussian's computation
+    // if (idx == 0) {
+    //     printf("DEBUG CUDA: First gaussian eigenvalues: lambda1=%f, lambda2=%f\n", lambda1, lambda2);
+    //     printf("DEBUG CUDA: Radii in pixels: rx=%f, ry=%f\n", radius_x_pixels, radius_y_pixels);
+    //     printf("DEBUG CUDA: Discriminant=%f, trace=%f, det=%f\n", discriminant, trace, det);
+    // }
+    
+    // Cull if quad would be too small (less than 0.001 pixel - very permissive for debugging)
+    if (radius_x_pixels < 0.001f || radius_y_pixels < 0.001f) {
         visibility_mask[idx] = 0;
+        // Initialize quad params to zero
+        quad_params[quad_offset + 0] = 0.0f;
+        quad_params[quad_offset + 1] = 0.0f;
+        quad_params[quad_offset + 2] = 0.0f;
+        quad_params[quad_offset + 3] = 0.0f;
         return;
     }
     
@@ -202,10 +224,24 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float center_x = vx * inv_z;
     float center_y = vy * inv_z;
     
+    // Check for invalid values only
+    if (!isfinite(center_x) || !isfinite(center_y)) {
+        visibility_mask[idx] = 0;
+        quad_params[quad_offset + 0] = 0.0f;
+        quad_params[quad_offset + 1] = 0.0f;
+        quad_params[quad_offset + 2] = 0.0f;
+        quad_params[quad_offset + 3] = 0.0f;
+        return;
+    }
+    
     // Convert pixel radii to NDC space
     // NDC space spans [-1, 1], so 2 NDC units = viewport_width pixels
     float radius_x_ndc = (2.0f * radius_x_pixels) / viewport_width;
     float radius_y_ndc = (2.0f * radius_y_pixels) / viewport_height;
+    
+    // Don't cap radius - let them be their natural size
+    // radius_x_ndc = fminf(radius_x_ndc, 0.5f);
+    // radius_y_ndc = fminf(radius_y_ndc, 0.5f);
     
     // Store quad parameters (all in NDC space)
     quad_params[quad_offset + 0] = center_x;
@@ -251,6 +287,12 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     // Get atomic counter for visible quad index (only after validation)
     int quad_idx = atomicAdd(visible_count, 1);
     
+    // DEBUG: Print first quad generation
+    // if (idx == 0) {
+    //     printf("DEBUG QUAD GEN: idx=%d, center=(%f, %f), radius=(%f, %f), quad_idx=%d\n", 
+    //            idx, center_x, center_y, radius_x, radius_y, quad_idx);
+    // }
+    
     // Load 2D covariance matrix
     int cov_offset = idx * 3;
     float cov_00 = cov2d_data[cov_offset + 0];
@@ -260,8 +302,15 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     // Compute inverse of 2D covariance matrix for fragment shader
     float det = cov_00 * cov_11 - cov_01 * cov_01;
     
-    // Skip if covariance matrix is degenerate
-    if (det <= 1e-6f || cov_00 <= 1e-6f || cov_11 <= 1e-6f) {
+    // DEBUG: Print first quad's covariance details
+    // if (idx == 0) {
+    //     printf("DEBUG QUAD GEN: cov=[[%f, %f], [%f, %f]], det=%f\n", 
+    //            cov_00, cov_01, cov_01, cov_11, det);
+    // }
+    
+    // Skip if covariance matrix is degenerate (made more permissive)
+    if (det <= 1e-12f || cov_00 <= 1e-12f || cov_11 <= 1e-12f) {
+        // if (idx == 0) printf("DEBUG QUAD GEN: Skipping due to degenerate covariance\n");
         return;
     }
     

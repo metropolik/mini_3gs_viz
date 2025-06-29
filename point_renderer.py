@@ -247,7 +247,8 @@ class PointRenderer:
             rot_1 = pcd_t.point['rot_1'].numpy()
             rot_2 = pcd_t.point['rot_2'].numpy()
             rot_3 = pcd_t.point['rot_3'].numpy()
-            rotations = np.stack([rot_0, rot_1, rot_2, rot_3], axis=-1)
+            # Note: PLY stores as (x,y,z,w) in rot_0-3, but we need (w,x,y,z) for the kernel
+            rotations = np.stack([rot_3, rot_0, rot_1, rot_2], axis=-1)  # Reorder to (w,x,y,z)
             rotations = np.squeeze(rotations)
             if rotations.ndim == 3 and rotations.shape[1] == 1:
                 rotations = rotations.squeeze(1)
@@ -345,7 +346,8 @@ class PointRenderer:
         
         # Sort points by depth (z-coordinate in view space, farthest to closest for proper blending)
         view_z = gpu_view_space[:, 2]  # Extract z-coordinates in view space
-        sorted_indices = cp.argsort(-view_z)  # Sort by negative z (farthest to closest)
+        # Only sort points that are in front of the camera (z < 0)
+        sorted_indices = cp.argsort(view_z)  # Sort by z (closest to farthest, then we'll reverse for visible ones)
         
         # Apply sorting to view space coordinates
         gpu_view_space_sorted = gpu_view_space[sorted_indices]
@@ -423,9 +425,31 @@ class PointRenderer:
             print("First 3 original points:", self.original_positions[:3])
             print("First 3 view-space points (unsorted):", cp.asnumpy(gpu_view_space[:3]))
             print("First 3 view-space z-values (sorted):", cp.asnumpy(view_z[sorted_indices[:3]]))
+            print("View-space z range:", cp.asnumpy(view_z).min(), "to", cp.asnumpy(view_z).max())
+            print("Num points with z < 0 (in front):", (cp.asnumpy(view_z) < 0).sum())
             print("First 3 transformed points (sorted):", transformed_positions[:3])
             print("First 3 2D covariance matrices:", cov2d_data[:3])
+            # Find first visible point (z < 0)
+            view_z_sorted = cp.asnumpy(gpu_view_space_sorted[:, 2])
+            first_visible_idx = np.where(view_z_sorted < 0)[0][0] if np.any(view_z_sorted < 0) else 0
+            print(f"First visible point at index {first_visible_idx}, z={view_z_sorted[first_visible_idx]:.3f}")
+            print("First 3 scales (sorted):", cp.asnumpy(gpu_scales_sorted[:3]))
+            print("First 3 rotations (sorted):", cp.asnumpy(gpu_rotations_sorted[:3]))
             print("First 3 quad parameters (center_x, center_y, radius_x, radius_y):", quad_params[:3])
+            if first_visible_idx >= 0:
+                print(f"First VISIBLE point quad params at idx {first_visible_idx}:", quad_params[first_visible_idx])
+                # Find first non-zero quad params
+                non_zero_mask = np.any(quad_params != 0, axis=1)
+                if np.any(non_zero_mask):
+                    first_non_zero = np.where(non_zero_mask)[0][0]
+                    print(f"First non-zero quad params at idx {first_non_zero}:", quad_params[first_non_zero])
+                    print(f"Its visibility mask:", visibility_mask[first_non_zero])
+                    
+                    # Find quad with center in reasonable NDC range
+                    reasonable_mask = (np.abs(quad_params[:, 0]) < 1.1) & (np.abs(quad_params[:, 1]) < 1.1) & non_zero_mask
+                    if np.any(reasonable_mask):
+                        first_reasonable = np.where(reasonable_mask)[0][0]
+                        print(f"First reasonable quad at idx {first_reasonable}:", quad_params[first_reasonable])
             print("Visible Gaussians:", visibility_mask.sum(), "/", len(visibility_mask))
             print("Generated quads:", visible_count)
             if visible_count > 0:
@@ -450,7 +474,19 @@ class PointRenderer:
         
         # Render quads if we have any visible ones
         if visible_count > 0:
+            # Print debug info only once
+            if not hasattr(self, '_quad_debug_printed'):
+                print(f"DEBUG: Rendering {visible_count} visible quads")
+                print(f"DEBUG: First quad center from params: ({quad_params[0, 0]:.3f}, {quad_params[0, 1]:.3f})")
+                print(f"DEBUG: First quad vertices (first 4):")
+                for i in range(min(4, len(quad_vertices))):
+                    print(f"  Vertex {i}: pos=({quad_vertices[i, 0]:.3f}, {quad_vertices[i, 1]:.3f}, {quad_vertices[i, 2]:.3f}), color=({quad_vertices[i, 3]:.3f}, {quad_vertices[i, 4]:.3f}, {quad_vertices[i, 5]:.3f})")
+                self._quad_debug_printed = True
             self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count)
+        else:
+            if not hasattr(self, '_no_quad_debug_printed'):
+                print("DEBUG: No visible quads generated!")
+                self._no_quad_debug_printed = True
         
         # Always render original points for comparison/debugging (for now)
         # Comment this out once quad rendering is working properly
@@ -523,6 +559,10 @@ class PointRenderer:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
+        # Keep depth testing enabled but disable face culling for debugging
+        # glDisable(GL_DEPTH_TEST)
+        glDisable(GL_CULL_FACE)
+        
         # Render quads using current shader
         glUseProgram(self.shader_program)
         glBindVertexArray(self.quad_vao)
@@ -532,8 +572,28 @@ class PointRenderer:
         # For now, let's draw each quad as two triangles using GL_TRIANGLES with repeated vertices
         # We'll need to generate proper triangle indices
         
-        # For now, render as points to test the pipeline
-        glDrawArrays(GL_POINTS, 0, visible_count * 4)
+        # Create index buffer for rendering quads as triangles
+        # Each quad (4 vertices) needs 6 indices for 2 triangles
+        indices = []
+        for i in range(visible_count):
+            base = i * 4
+            # First triangle: bottom-left, bottom-right, top-left
+            indices.extend([base + 0, base + 1, base + 2])
+            # Second triangle: bottom-right, top-right, top-left
+            indices.extend([base + 1, base + 3, base + 2])
+        
+        indices = np.array(indices, dtype=np.uint32)
+        
+        # Create and bind index buffer
+        ibo = glGenBuffers(1)
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+        
+        # Draw all quads with a single indexed draw call
+        glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
+        
+        # Clean up index buffer
+        glDeleteBuffers(1, [ibo])
         
         glBindVertexArray(0)
         glUseProgram(0)
