@@ -55,6 +55,13 @@ class PointRenderer:
         self.use_cuda = False  # Disable CUDA for now
         self._debug_printed = False  # Debug flag
         
+        # CUDA kernel for transformations
+        self.transform_kernel = None
+        if CUPY_AVAILABLE:
+            self._load_transform_kernel()
+        else:
+            raise RuntimeError("CuPy is required for the custom transform kernel")
+        
         # Initialize if PLY file is provided
         if ply_path and os.path.exists(ply_path):
             self._setup_shaders()
@@ -99,6 +106,16 @@ class PointRenderer:
         glDeleteShader(fragment_shader)
         
         # No uniforms needed for pre-transformed vertices
+    
+    def _load_transform_kernel(self):
+        """Load the custom CUDA transform kernel"""
+        try:
+            with open('transform_kernel.cu', 'r') as f:
+                kernel_source = f.read()
+            self.transform_kernel = cp.RawKernel(kernel_source, 'transform_points')
+            print("Custom transform kernel loaded successfully")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load transform kernel: {e}")
     
     
     def _load_ply(self):
@@ -171,75 +188,41 @@ class PointRenderer:
         glBindVertexArray(0)
     
     def render(self, mvp_matrix):
-        """Render the points with given MVP matrix using CPU transformation"""
+        """Render the points with given MVP matrix using CuPy GPU transformation"""
         if not self.shader_program or not self.vao:
             return
         
-        # Transform points using NumPy on CPU
+        # Transform points using custom CUDA kernel
         # Add homogeneous coordinate (w=1) to all points
         homogeneous_positions = np.ones((self.num_points, 4), dtype=np.float32)
         homogeneous_positions[:, :3] = self.original_positions
         
-        # Apply MVP transformation to all points at once
-        transformed_homogeneous = (mvp_matrix @ homogeneous_positions.T).T
+        # Transfer data to GPU
+        gpu_homogeneous = cp.asarray(homogeneous_positions)
+        gpu_mvp = cp.asarray(mvp_matrix.astype(np.float32))
         
-        # Perform perspective division
-        w_values = transformed_homogeneous[:, 3]
-        # Avoid division by zero
-        valid_w = np.where(np.abs(w_values) < 1e-8, 1e-8, w_values)
+        # Allocate output buffer for transformed positions (3 components per point)
+        gpu_transformed_positions = cp.zeros((self.num_points, 3), dtype=cp.float32)
         
-        transformed_positions = transformed_homogeneous[:, :3] / valid_w.reshape(-1, 1)
+        # Launch custom CUDA kernel (includes perspective division)
+        block_size = 256
+        grid_size = (self.num_points + block_size - 1) // block_size
+        self.transform_kernel((grid_size,), (block_size,), 
+                            (gpu_mvp, gpu_homogeneous, gpu_transformed_positions, self.num_points))
         
-        # Use CuPy for transformation if available, otherwise use NumPy
-        if CUPY_AVAILABLE:
-            # Transfer data to GPU
-            gpu_homogeneous = cp.asarray(homogeneous_positions)
-            gpu_mvp = cp.asarray(mvp_matrix)
-            
-            # Apply MVP transformation on GPU
-            gpu_transformed_homogeneous = (gpu_mvp @ gpu_homogeneous.T).T
-            
-            # Perform perspective division on GPU
-            gpu_w_values = gpu_transformed_homogeneous[:, 3]
-            gpu_valid_w = cp.where(cp.abs(gpu_w_values) < 1e-8, 1e-8, gpu_w_values)
-            gpu_transformed_positions = gpu_transformed_homogeneous[:, :3] / gpu_valid_w.reshape(-1, 1)
-            
-            # Transfer back to CPU for rendering
-            final_transformed_positions = cp.asnumpy(gpu_transformed_positions)
-            final_w_values = cp.asnumpy(gpu_w_values)
-            
-            # Keep NumPy calculation for comparison (optional)
-            position_diff = np.abs(transformed_positions - final_transformed_positions)
-            max_position_diff = np.max(position_diff)
-            w_diff = np.abs(w_values - final_w_values)
-            max_w_diff = np.max(w_diff)
-        else:
-            # Use NumPy results as primary
-            final_transformed_positions = transformed_positions
-            final_w_values = w_values
+        # Transfer back to CPU for rendering
+        transformed_positions = cp.asnumpy(gpu_transformed_positions)
         
         # Debug output for first frame
         if not self._debug_printed:
-            if CUPY_AVAILABLE:
-                print("=== USING CUPY TRANSFORMATION ===")
-                print("First 3 original points:", self.original_positions[:3])
-                print("First 3 CuPy transformed points:", final_transformed_positions[:3])
-                print("First 3 CuPy w values:", final_w_values[:3])
-                print(f"NumPy vs CuPy max position difference: {max_position_diff}")
-                print(f"NumPy vs CuPy max w difference: {max_w_diff}")
-                print(f"Results match: {max_position_diff < 1e-5 and max_w_diff < 1e-5}")
-            else:
-                print("=== USING NUMPY TRANSFORMATION ===")
-                print("First 3 original points:", self.original_positions[:3])
-                print("First 3 transformed points:", final_transformed_positions[:3])
-                print("First 3 w values:", final_w_values[:3])
-                print("CuPy not available, using NumPy")
-            
+            print("=== CUSTOM CUDA KERNEL TRANSFORMATION ===")
+            print("First 3 original points:", self.original_positions[:3])
+            print("First 3 transformed points:", transformed_positions[:3])
             self._debug_printed = True
         
-        # Create interleaved vertex data with final transformed positions
+        # Create interleaved vertex data with transformed positions
         vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
-        vertex_data[:, :3] = final_transformed_positions
+        vertex_data[:, :3] = transformed_positions
         vertex_data[:, 3:6] = self.colors
         vertex_data = vertex_data.flatten()
         
