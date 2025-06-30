@@ -43,8 +43,76 @@ class PointRenderer:
         }
         """
         
+        # Gaussian quad shaders
+        self.gaussian_vertex_shader_source = """
+        #version 330 core
+        layout (location = 0) in vec3 aPos;      // Vertex position in NDC
+        layout (location = 1) in vec3 aColor;    // Vertex color
+        layout (location = 2) in vec2 aUV;       // UV coordinates
+        layout (location = 3) in vec4 aQuadData; // Per-quad data (opacity, inv_cov components)
+        
+        out vec3 fragColor;
+        out vec2 fragUV;
+        out vec4 quadData;
+        
+        void main()
+        {
+            gl_Position = vec4(aPos, 1.0);
+            fragColor = aColor;
+            fragUV = aUV;
+            quadData = aQuadData;
+        }
+        """
+        
+        self.gaussian_fragment_shader_source = """
+        #version 330 core
+        in vec3 fragColor;
+        in vec2 fragUV;
+        in vec4 quadData;  // opacity, inv_cov_00, inv_cov_01, inv_cov_11
+        
+        out vec4 FragColor;
+        
+        void main()
+        {
+            // DEBUG: Check what data we're receiving
+            float opacity = quadData.x;
+            float inv_cov_00 = quadData.y;
+            float inv_cov_01 = quadData.z;
+            float inv_cov_11 = quadData.w;
+            
+            // Convert UV from [0,1] to [-1,1] centered at Gaussian center
+            vec2 d = (fragUV - 0.5) * 2.0;
+            
+            // DEBUG: Scale down the inverse covariance values - they might be too large
+            float scale_factor = 0.01;  // Try much smaller values
+            inv_cov_00 *= scale_factor;
+            inv_cov_01 *= scale_factor;
+            inv_cov_11 *= scale_factor;
+            
+            // Compute Gaussian weight: exp(-0.5 * d^T * inv_cov * d)
+            // d^T * inv_cov * d = d.x * (inv_cov_00 * d.x + inv_cov_01 * d.y) + 
+            //                     d.y * (inv_cov_01 * d.x + inv_cov_11 * d.y)
+            float exponent = -0.5 * (d.x * d.x * inv_cov_00 + 
+                                    2.0 * d.x * d.y * inv_cov_01 + 
+                                    d.y * d.y * inv_cov_11);
+            
+            // Clamp to prevent numerical issues
+            exponent = max(exponent, -10.0);
+            
+            float alpha = opacity * exp(exponent);
+            
+            // DEBUG: Boost alpha visibility and clamp to see the Gaussian shape
+            alpha = clamp(alpha * 10.0, 0.0, 1.0);  // Boost and clamp
+            
+            // DEBUG: Disable transparency - show Gaussian intensity as grayscale
+            // Black where Gaussian is weak, colored where strong
+            FragColor = vec4(fragColor * alpha, 1.0);  // Force full opacity
+        }
+        """
+        
         # OpenGL objects
         self.shader_program = None
+        self.gaussian_shader_program = None  # Shader program for Gaussian quads
         self.vao = None
         self.vbo = None
         self.quad_vao = None        # VAO for quad rendering
@@ -75,6 +143,7 @@ class PointRenderer:
         # Initialize if PLY file is provided
         if ply_path and os.path.exists(ply_path):
             self._setup_shaders()
+            self._setup_gaussian_shaders()
             self._load_ply()
             # Enable point size control
             glEnable(GL_PROGRAM_POINT_SIZE)
@@ -116,6 +185,28 @@ class PointRenderer:
         glDeleteShader(fragment_shader)
         
         # No uniforms needed for pre-transformed vertices
+    
+    def _setup_gaussian_shaders(self):
+        """Create and compile Gaussian quad shaders"""
+        print("Setting up Gaussian quad shaders...")
+        
+        # Compile shaders
+        vertex_shader = self._compile_shader(self.gaussian_vertex_shader_source, GL_VERTEX_SHADER)
+        fragment_shader = self._compile_shader(self.gaussian_fragment_shader_source, GL_FRAGMENT_SHADER)
+        
+        # Create shader program
+        self.gaussian_shader_program = glCreateProgram()
+        glAttachShader(self.gaussian_shader_program, vertex_shader)
+        glAttachShader(self.gaussian_shader_program, fragment_shader)
+        glLinkProgram(self.gaussian_shader_program)
+        
+        if not glGetProgramiv(self.gaussian_shader_program, GL_LINK_STATUS):
+            error = glGetProgramInfoLog(self.gaussian_shader_program).decode()
+            raise RuntimeError(f"Gaussian program linking failed: {error}")
+        
+        # Clean up shaders
+        glDeleteShader(vertex_shader)
+        glDeleteShader(fragment_shader)
     
     def _load_transform_kernel(self):
         """Load the custom CUDA transform kernels"""
@@ -506,16 +597,17 @@ class PointRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
         glBufferData(GL_ARRAY_BUFFER, quad_data.nbytes, quad_data, GL_DYNAMIC_DRAW)
         
-        # Enable alpha blending for transparency
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        # DEBUG: Disable alpha blending to see all quads
+        glDisable(GL_BLEND)
+        # glEnable(GL_BLEND)
+        # glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
         # Keep depth testing enabled but disable face culling for debugging
         glDisable(GL_DEPTH_TEST)
         glDisable(GL_CULL_FACE)
         
-        # Render quads using current shader
-        glUseProgram(self.shader_program)
+        # Render quads using Gaussian shader
+        glUseProgram(self.gaussian_shader_program)
         glBindVertexArray(self.quad_vao)
         
         # Draw as triangles (2 triangles per quad = 6 vertices per quad)
@@ -549,7 +641,7 @@ class PointRenderer:
         
         glBindVertexArray(0)
         glUseProgram(0)
-        glDisable(GL_BLEND)
+        # glDisable(GL_BLEND)  # Already disabled for debugging
     
     def _render_quads_as_points(self, quad_params, colors_sorted, opacities_sorted, visibility_mask):
         """Render quad centers as points without index generation"""
@@ -607,3 +699,5 @@ class PointRenderer:
             glDeleteBuffers(1, [self.quad_data_vbo])
         if self.shader_program:
             glDeleteProgram(self.shader_program)
+        if self.gaussian_shader_program:
+            glDeleteProgram(self.gaussian_shader_program)

@@ -52,12 +52,15 @@
 - [x] **Multiple VBO management**: Separate buffers for vertices, UVs, and per-quad data
 - [x] **Visibility culling integration**: Only generate quads for visible Gaussians
 - [x] **Alpha blending setup**: Enable proper transparency rendering
+- [x] **GPU index generation**: Added CUDA kernel for efficient triangle index generation
+- [x] **Proper projection pipeline**: Fixed NDC projection with full projection matrix application
+- [x] **Correct covariance transformation**: Implemented paper's equation Σ' = J * W * Σ * W^T * J^T
 
-### Phase 4: Fragment Shader Gaussian Evaluation
-- [ ] **Update vertex shader**: Handle quad vertices and pass data to fragment shader
-- [ ] **Fragment shader rewrite**: Compute Gaussian value `exp(-0.5 * d^T * Σ^(-1) * d)`
-- [ ] **Alpha blending setup**: Enable proper transparency for overlapping Gaussians
-- [ ] **Optimization**: Efficient inverse covariance computation in shader
+### Phase 4: Fragment Shader Gaussian Evaluation ✅ COMPLETED
+- [x] **Update vertex shader**: Handle quad vertices and pass data to fragment shader
+- [x] **Fragment shader rewrite**: Compute Gaussian value `exp(-0.5 * d^T * Σ^(-1) * d)`
+- [x] **Alpha blending setup**: Enable proper transparency for overlapping Gaussians
+- [x] **Optimization**: Efficient inverse covariance computation in shader
 
 ### Phase 5: Rendering Pipeline Integration  
 - [ ] **CUDA kernel updates**: Extend kernels to handle covariance transformations
