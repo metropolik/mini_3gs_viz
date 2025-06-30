@@ -73,6 +73,23 @@ void transform_points_with_perspective(const float* matrix, const float* input_p
     output_positions[output_offset + 2] = tz / valid_w;
 }
 
+// Device function to project a point from view space to NDC
+__device__ void project_to_ndc(float vx, float vy, float vz, float vw,
+                               const float* proj_matrix,
+                               float& ndc_x, float& ndc_y, float& ndc_z) {
+    // Apply projection matrix
+    float clip_x = proj_matrix[0] * vx + proj_matrix[1] * vy + proj_matrix[2] * vz + proj_matrix[3] * vw;
+    float clip_y = proj_matrix[4] * vx + proj_matrix[5] * vy + proj_matrix[6] * vz + proj_matrix[7] * vw;
+    float clip_z = proj_matrix[8] * vx + proj_matrix[9] * vy + proj_matrix[10] * vz + proj_matrix[11] * vw;
+    float clip_w = proj_matrix[12] * vx + proj_matrix[13] * vy + proj_matrix[14] * vz + proj_matrix[15] * vw;
+    
+    // Perform perspective division
+    float inv_w = 1.0f / (fabsf(clip_w) < 1e-8f ? 1e-8f : clip_w);
+    ndc_x = clip_x * inv_w;
+    ndc_y = clip_y * inv_w;
+    ndc_z = clip_z * inv_w;
+}
+
 // Compute 2D covariance matrices and quad parameters for Gaussian splatting
 extern "C" __global__
 void compute_2d_covariance(const float* view_space_positions,    // View space positions (4 components each)
@@ -220,12 +237,12 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
         return;
     }
     
-    // Project center to normalized device coordinates (NDC)
-    float center_x = vx * inv_z;
-    float center_y = vy * inv_z;
+    // Project center to normalized device coordinates (NDC) using full projection
+    float ndc_x, ndc_y, ndc_z;
+    project_to_ndc(vx, vy, vz, vw, proj_matrix, ndc_x, ndc_y, ndc_z);
     
     // Check for invalid values only
-    if (!isfinite(center_x) || !isfinite(center_y)) {
+    if (!isfinite(ndc_x) || !isfinite(ndc_y)) {
         visibility_mask[idx] = 0;
         quad_params[quad_offset + 0] = 0.0f;
         quad_params[quad_offset + 1] = 0.0f;
@@ -239,13 +256,24 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float radius_x_ndc = (2.0f * radius_x_pixels) / viewport_width;
     float radius_y_ndc = (2.0f * radius_y_pixels) / viewport_height;
     
-    // Don't cap radius - let them be their natural size
-    // radius_x_ndc = fminf(radius_x_ndc, 0.5f);
-    // radius_y_ndc = fminf(radius_y_ndc, 0.5f);
+    // DEBUG: Scale up quads to make them visible, but preserve perspective scaling
+    // Use distance-based scaling so closer objects are larger
+    float distance = -vz;  // Distance from camera (vz is negative in front)
+    //float scale_factor = 10000.0f / distance;  // Adjust this factor to make them visible
+    //float scale_factor= 1.F / distance;
+    //float scale_factor= ;
+    //radius_x_ndc *= scale_factor;
+    //radius_y_ndc *= scale_factor;
+    
+    // Cap to reasonable size
+    //radius_x_ndc = radius_x_ndc;
+    //radius_y_ndc = radius_y_ndc;
+    radius_x_ndc = fminf(radius_x_ndc, 0.002f);
+    radius_y_ndc = fminf(radius_y_ndc, 0.002f);
     
     // Store quad parameters (all in NDC space)
-    quad_params[quad_offset + 0] = center_x;
-    quad_params[quad_offset + 1] = center_y;
+    quad_params[quad_offset + 0] = ndc_x;
+    quad_params[quad_offset + 1] = ndc_y;
     quad_params[quad_offset + 2] = radius_x_ndc;
     quad_params[quad_offset + 3] = radius_y_ndc;
     
@@ -366,8 +394,8 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
         float world_y = evec_y * local_x + evec_x * local_y;
         
         // Store vertex position (in NDC space, z=0 for screen-aligned quads)
-        quad_vertices[vertex_offset + 0] = center_x + world_x;
-        quad_vertices[vertex_offset + 1] = center_y + world_y;
+        quad_vertices[vertex_offset + 0] = center_x;// + world_x;
+        quad_vertices[vertex_offset + 1] = center_y;// + world_y;
         quad_vertices[vertex_offset + 2] = 0.0f;  // Screen-aligned
         
         // Store vertex color

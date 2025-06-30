@@ -418,54 +418,11 @@ class PointRenderer:
         quad_params = cp.asnumpy(gpu_quad_params)
         visibility_mask = cp.asnumpy(gpu_visibility_mask)
         
-        # Debug output for first frame
+        # Debug output for first frame (simplified)
         if not self._debug_printed:
-            print("=== GAUSSIAN SPLATTING PIPELINE WITH QUAD GENERATION ===")
-            print("Viewport dimensions:", viewport_width, "x", viewport_height)
-            print("First 3 original points:", self.original_positions[:3])
-            print("First 3 view-space points (unsorted):", cp.asnumpy(gpu_view_space[:3]))
-            print("First 3 view-space z-values (sorted):", cp.asnumpy(view_z[sorted_indices[:3]]))
-            print("View-space z range:", cp.asnumpy(view_z).min(), "to", cp.asnumpy(view_z).max())
-            print("Num points with z < 0 (in front):", (cp.asnumpy(view_z) < 0).sum())
-            print("First 3 transformed points (sorted):", transformed_positions[:3])
-            print("First 3 2D covariance matrices:", cov2d_data[:3])
-            # Find first visible point (z < 0)
-            view_z_sorted = cp.asnumpy(gpu_view_space_sorted[:, 2])
-            first_visible_idx = np.where(view_z_sorted < 0)[0][0] if np.any(view_z_sorted < 0) else 0
-            print(f"First visible point at index {first_visible_idx}, z={view_z_sorted[first_visible_idx]:.3f}")
-            print("First 3 scales (sorted):", cp.asnumpy(gpu_scales_sorted[:3]))
-            print("First 3 rotations (sorted):", cp.asnumpy(gpu_rotations_sorted[:3]))
-            print("First 3 quad parameters (center_x, center_y, radius_x, radius_y):", quad_params[:3])
-            if first_visible_idx >= 0:
-                print(f"First VISIBLE point quad params at idx {first_visible_idx}:", quad_params[first_visible_idx])
-                # Find first non-zero quad params
-                non_zero_mask = np.any(quad_params != 0, axis=1)
-                if np.any(non_zero_mask):
-                    first_non_zero = np.where(non_zero_mask)[0][0]
-                    print(f"First non-zero quad params at idx {first_non_zero}:", quad_params[first_non_zero])
-                    print(f"Its visibility mask:", visibility_mask[first_non_zero])
-                    
-                    # Find quad with center in reasonable NDC range
-                    reasonable_mask = (np.abs(quad_params[:, 0]) < 1.1) & (np.abs(quad_params[:, 1]) < 1.1) & non_zero_mask
-                    if np.any(reasonable_mask):
-                        first_reasonable = np.where(reasonable_mask)[0][0]
-                        print(f"First reasonable quad at idx {first_reasonable}:", quad_params[first_reasonable])
-            print("Visible Gaussians:", visibility_mask.sum(), "/", len(visibility_mask))
-            print("Generated quads:", visible_count)
-            if visible_count > 0:
-                print("First quad vertices (4 vertices):", quad_vertices[:4])
-                print("First quad UVs:", quad_uvs[:4])
-                print("First quad data (opacity, inv_cov):", quad_data[0] if len(quad_data) > 0 else "None")
-            else:
-                print("NO QUADS GENERATED - checking first few visibility results...")
-                print("First 10 visibility mask values:", visibility_mask[:10])
-                print("First 3 view-space z values:", cp.asnumpy(gpu_view_space[:3, 2]))
-                if visibility_mask.sum() == 0:
-                    print("All Gaussians failed visibility test!")
-                    print("Checking potential issues:")
-                    print("- View space z range:", cp.asnumpy(gpu_view_space[:, 2]).min(), "to", cp.asnumpy(gpu_view_space[:, 2]).max())
-                    print("- Are z values positive (behind camera)?", (cp.asnumpy(gpu_view_space[:, 2]) > 0).sum(), "out of", len(gpu_view_space))
-            print("Sorting indices (first 10):", cp.asnumpy(sorted_indices[:10]))
+            print("=== QUAD RENDERING ACTIVE ===")
+            print(f"Visible Gaussians: {visibility_mask.sum()} / {len(visibility_mask)}")
+            print(f"Generated quads: {visible_count}")
             self._debug_printed = True
         
         # Set up quad VAO and VBOs if not already done
@@ -473,41 +430,34 @@ class PointRenderer:
             self._setup_quad_rendering()
         
         # Render quads if we have any visible ones
-        if visible_count > 0:
-            # Print debug info only once
-            if not hasattr(self, '_quad_debug_printed'):
-                print(f"DEBUG: Rendering {visible_count} visible quads")
-                print(f"DEBUG: First quad center from params: ({quad_params[0, 0]:.3f}, {quad_params[0, 1]:.3f})")
-                print(f"DEBUG: First quad vertices (first 4):")
-                for i in range(min(4, len(quad_vertices))):
-                    print(f"  Vertex {i}: pos=({quad_vertices[i, 0]:.3f}, {quad_vertices[i, 1]:.3f}, {quad_vertices[i, 2]:.3f}), color=({quad_vertices[i, 3]:.3f}, {quad_vertices[i, 4]:.3f}, {quad_vertices[i, 5]:.3f})")
-                self._quad_debug_printed = True
+        if visible_count > 0 and False:
             self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count)
+        
+        # Render quads as points (new method that doesn't require index generation)
+        render_quads_as_points = True
+        if render_quads_as_points:
+            opacities_sorted = cp.asnumpy(gpu_opacities_sorted)
+            self._render_quads_as_points(quad_params, colors_sorted, opacities_sorted, visibility_mask)
         else:
-            if not hasattr(self, '_no_quad_debug_printed'):
-                print("DEBUG: No visible quads generated!")
-                self._no_quad_debug_printed = True
+            # Original point rendering for comparison/debugging
+            # Create interleaved vertex data with transformed positions and sorted colors
+            vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
+            vertex_data[:, :3] = transformed_positions
+            vertex_data[:, 3:6] = colors_sorted
+            vertex_data = vertex_data.flatten()
         
-        # Always render original points for comparison/debugging (for now)
-        # Comment this out once quad rendering is working properly
-        # Create interleaved vertex data with transformed positions and sorted colors
-        vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
-        vertex_data[:, :3] = transformed_positions
-        vertex_data[:, 3:6] = colors_sorted
-        vertex_data = vertex_data.flatten()
+            # Update VBO with transformed data
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+            glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_data.nbytes, vertex_data)
         
-        # Update VBO with transformed data
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_data.nbytes, vertex_data)
+            # Render using shader (no MVP uniform needed)
+            glUseProgram(self.shader_program)
         
-        # Render using shader (no MVP uniform needed)
-        glUseProgram(self.shader_program)
+            glBindVertexArray(self.vao)
+            glDrawArrays(GL_POINTS, 0, self.num_points)
+            glBindVertexArray(0)
         
-        glBindVertexArray(self.vao)
-        glDrawArrays(GL_POINTS, 0, self.num_points)
-        glBindVertexArray(0)
-        
-        glUseProgram(0)
+            glUseProgram(0)
     
     def _setup_quad_rendering(self):
         """Set up OpenGL objects for quad rendering"""
@@ -594,6 +544,46 @@ class PointRenderer:
         
         # Clean up index buffer
         glDeleteBuffers(1, [ibo])
+        
+        glBindVertexArray(0)
+        glUseProgram(0)
+        glDisable(GL_BLEND)
+    
+    def _render_quads_as_points(self, quad_params, colors_sorted, opacities_sorted, visibility_mask):
+        """Render quad centers as points without index generation"""
+        # Extract visible Gaussians only
+        visible_indices = np.where(visibility_mask > 0)[0]
+        if len(visible_indices) == 0:
+            return
+        
+        # Extract quad centers and colors for visible Gaussians
+        visible_centers = quad_params[visible_indices, :2]  # center_x, center_y from quad_params
+        visible_colors = colors_sorted[visible_indices]
+        visible_opacities = opacities_sorted[visible_indices]
+        
+        # Create vertex data for points (x, y, z=0, r, g, b)
+        point_count = len(visible_indices)
+        vertex_data = np.zeros((point_count, 6), dtype=np.float32)
+        vertex_data[:, 0] = visible_centers[:, 0]  # x in NDC
+        vertex_data[:, 1] = visible_centers[:, 1]  # y in NDC
+        vertex_data[:, 2] = 0.0  # z = 0 (already in screen space)
+        vertex_data[:, 3:6] = visible_colors
+        vertex_data = vertex_data.flatten()
+        
+        # Update VBO with point data
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)
+        
+        # Enable alpha blending for transparency
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # Render using shader
+        glUseProgram(self.shader_program)
+        glBindVertexArray(self.vao)
+        
+        # Draw as points
+        glDrawArrays(GL_POINTS, 0, point_count)
         
         glBindVertexArray(0)
         glUseProgram(0)
