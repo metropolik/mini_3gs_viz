@@ -443,3 +443,27 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     quad_data[quad_data_offset + 2] = inv_cov_01;
     quad_data[quad_data_offset + 3] = inv_cov_11;
 }
+
+// Generate indices for rendering quads as triangles
+extern "C" __global__
+void generate_quad_indices(unsigned int* indices,    // Output: Triangle indices
+                          int num_quads) {           // Number of quads to generate indices for
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx >= num_quads) return;
+    
+    // Each quad needs 6 indices (2 triangles)
+    // Quad vertices are ordered: bottom-left(0), bottom-right(1), top-left(2), top-right(3)
+    int base_vertex = idx * 4;
+    int base_index = idx * 6;
+    
+    // First triangle: bottom-left, bottom-right, top-left (0, 1, 2)
+    indices[base_index + 0] = base_vertex + 0;
+    indices[base_index + 1] = base_vertex + 1;
+    indices[base_index + 2] = base_vertex + 2;
+    
+    // Second triangle: bottom-right, top-right, top-left (1, 3, 2)
+    indices[base_index + 3] = base_vertex + 1;
+    indices[base_index + 4] = base_vertex + 3;
+    indices[base_index + 5] = base_vertex + 2;
+}

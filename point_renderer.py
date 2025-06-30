@@ -126,7 +126,8 @@ class PointRenderer:
             self.transform_perspective_kernel = cp.RawKernel(kernel_source, 'transform_points_with_perspective')
             self.covariance_kernel = cp.RawKernel(kernel_source, 'compute_2d_covariance')
             self.quad_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_vertices')
-            print("Custom transform, covariance, and quad generation kernels loaded successfully")
+            self.index_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_indices')
+            print("Custom transform, covariance, quad generation, and index generation kernels loaded successfully")
         except Exception as e:
             raise RuntimeError(f"Failed to load transform kernels: {e}")
     
@@ -522,17 +523,18 @@ class PointRenderer:
         # For now, let's draw each quad as two triangles using GL_TRIANGLES with repeated vertices
         # We'll need to generate proper triangle indices
         
-        # Create index buffer for rendering quads as triangles
-        # Each quad (4 vertices) needs 6 indices for 2 triangles
-        indices = []
-        for i in range(visible_count):
-            base = i * 4
-            # First triangle: bottom-left, bottom-right, top-left
-            indices.extend([base + 0, base + 1, base + 2])
-            # Second triangle: bottom-right, top-right, top-left
-            indices.extend([base + 1, base + 3, base + 2])
+        # Generate indices on GPU using CUDA kernel
+        num_indices = visible_count * 6  # 6 indices per quad (2 triangles)
+        gpu_indices = cp.zeros(num_indices, dtype=cp.uint32)
         
-        indices = np.array(indices, dtype=np.uint32)
+        # Launch index generation kernel
+        block_size = 256
+        grid_size = (visible_count + block_size - 1) // block_size
+        self.index_generation_kernel((grid_size,), (block_size,),
+                                   (gpu_indices, visible_count))
+        
+        # Transfer indices to CPU
+        indices = cp.asnumpy(gpu_indices)
         
         # Create and bind index buffer
         ibo = glGenBuffers(1)
