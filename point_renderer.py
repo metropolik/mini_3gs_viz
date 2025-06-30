@@ -510,7 +510,7 @@ class PointRenderer:
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
         # Keep depth testing enabled but disable face culling for debugging
-        # glDisable(GL_DEPTH_TEST)
+        glDisable(GL_DEPTH_TEST)
         glDisable(GL_CULL_FACE)
         
         # Render quads using current shader

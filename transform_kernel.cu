@@ -166,23 +166,53 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float cov3d_12 = rs21*rs31 + rs22*rs32 + rs23*rs33;
     float cov3d_22 = rs31*rs31 + rs32*rs32 + rs33*rs33;
     
+    // Apply viewing transformation W to the 3D covariance: Σ' = W * Σ_3D * W^T
+    // Extract the 3x3 rotation part of the model-view matrix (upper-left 3x3)
+    float w00 = mv_matrix[0], w01 = mv_matrix[1], w02 = mv_matrix[2];
+    float w10 = mv_matrix[4], w11 = mv_matrix[5], w12 = mv_matrix[6];
+    float w20 = mv_matrix[8], w21 = mv_matrix[9], w22 = mv_matrix[10];
+    
+    // Compute W * Σ_3D
+    float ws00 = w00*cov3d_00 + w01*cov3d_01 + w02*cov3d_02;
+    float ws01 = w00*cov3d_01 + w01*cov3d_11 + w02*cov3d_12;
+    float ws02 = w00*cov3d_02 + w01*cov3d_12 + w02*cov3d_22;
+    float ws10 = w10*cov3d_00 + w11*cov3d_01 + w12*cov3d_02;
+    float ws11 = w10*cov3d_01 + w11*cov3d_11 + w12*cov3d_12;
+    float ws12 = w10*cov3d_02 + w11*cov3d_12 + w12*cov3d_22;
+    float ws20 = w20*cov3d_00 + w21*cov3d_01 + w22*cov3d_02;
+    float ws21 = w20*cov3d_01 + w21*cov3d_11 + w22*cov3d_12;
+    float ws22 = w20*cov3d_02 + w21*cov3d_12 + w22*cov3d_22;
+    
+    // Compute (W * Σ_3D) * W^T to get view space covariance
+    float cov_view_00 = ws00*w00 + ws01*w01 + ws02*w02;
+    float cov_view_01 = ws00*w10 + ws01*w11 + ws02*w12;
+    float cov_view_02 = ws00*w20 + ws01*w21 + ws02*w22;
+    float cov_view_11 = ws10*w10 + ws11*w11 + ws12*w12;
+    float cov_view_12 = ws10*w20 + ws11*w21 + ws12*w22;
+    float cov_view_22 = ws20*w20 + ws21*w21 + ws22*w22;
+    
     // Project to screen space using Jacobian of perspective projection
-    // For point (x,y,z) in view space, screen coords are (x/z, y/z)
-    // Jacobian J = [[1/z, 0, -x/z^2], [0, 1/z, -y/z^2]]
+    // The projection matrix transforms (x,y,z) to (fx*x/z, fy*y/z) where fx, fy are from proj matrix
+    // Extract focal length scaling from projection matrix
+    float fx = proj_matrix[0];   // P[0,0] = focal_x / aspect
+    float fy = proj_matrix[5];   // P[1,1] = focal_y
+    
+    // For point (x,y,z) in view space, clip coords are (fx*x, fy*y, ...) before division by w
+    // Jacobian J = [[fx/z, 0, -fx*x/z^2], [0, fy/z, -fy*y/z^2]]
     float inv_z = 1.0f / (-vz);  // Note: vz is negative in view space
     float inv_z2 = inv_z * inv_z;
     
-    // Jacobian matrix elements
-    float j00 = inv_z;
-    float j02 = vx * inv_z2;
-    float j11 = inv_z;
-    float j12 = vy * inv_z2;
+    // Jacobian matrix elements with projection matrix scaling
+    float j00 = fx * inv_z;
+    float j02 = fx * vx * inv_z2;
+    float j11 = fy * inv_z;
+    float j12 = fy * vy * inv_z2;
     
-    // Compute 2D covariance: Σ_2D = J * Σ_3D * J^T
+    // Compute 2D covariance: Σ_2D = J * Σ_view * J^T
     // Only need upper triangle since matrix is symmetric
-    float cov2d_00 = j00*j00*cov3d_00 + j02*j02*cov3d_22 + 2.0f*j00*j02*cov3d_02;
-    float cov2d_01 = j00*j11*cov3d_01 + j02*j12*cov3d_12 + j00*j12*cov3d_02 + j02*j11*cov3d_01;
-    float cov2d_11 = j11*j11*cov3d_11 + j12*j12*cov3d_22 + 2.0f*j11*j12*cov3d_12;
+    float cov2d_00 = j00*j00*cov_view_00 + j02*j02*cov_view_22 + 2.0f*j00*j02*cov_view_02;
+    float cov2d_01 = j00*j11*cov_view_01 + j02*j12*cov_view_12 + j00*j12*cov_view_02 + j02*j11*cov_view_02;
+    float cov2d_11 = j11*j11*cov_view_11 + j12*j12*cov_view_22 + 2.0f*j11*j12*cov_view_12;
     
     // Add a small regularization term to ensure positive definiteness
     cov2d_00 += 1e-6f;
@@ -216,18 +246,19 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float lambda2 = 0.5f * (trace - sqrt_disc);
     
     // Compute radii (3σ = 3 * sqrt(eigenvalue))
-    float radius_x_pixels = 3.0f * sqrtf(fmaxf(lambda1, 1e-6f));
-    float radius_y_pixels = 3.0f * sqrtf(fmaxf(lambda2, 1e-6f));
+    // Note: eigenvalues are now in NDC space due to projection matrix scaling in Jacobian
+    float radius_x = 3.0f * sqrtf(fmaxf(lambda1, 1e-6f));
+    float radius_y = 3.0f * sqrtf(fmaxf(lambda2, 1e-6f));
     
     // DEBUG: Print first gaussian's computation
     // if (idx == 0) {
     //     printf("DEBUG CUDA: First gaussian eigenvalues: lambda1=%f, lambda2=%f\n", lambda1, lambda2);
-    //     printf("DEBUG CUDA: Radii in pixels: rx=%f, ry=%f\n", radius_x_pixels, radius_y_pixels);
+    //     printf("DEBUG CUDA: Radii in NDC: rx=%f, ry=%f\n", radius_x, radius_y);
     //     printf("DEBUG CUDA: Discriminant=%f, trace=%f, det=%f\n", discriminant, trace, det);
     // }
     
-    // Cull if quad would be too small (less than 0.001 pixel - very permissive for debugging)
-    if (radius_x_pixels < 0.001f || radius_y_pixels < 0.001f) {
+    // Cull if quad would be too small in NDC (less than 1e-6 - very permissive)
+    if (radius_x < 1e-6f || radius_y < 1e-6f) {
         visibility_mask[idx] = 0;
         // Initialize quad params to zero
         quad_params[quad_offset + 0] = 0.0f;
@@ -251,10 +282,10 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
         return;
     }
     
-    // Convert pixel radii to NDC space
-    // NDC space spans [-1, 1], so 2 NDC units = viewport_width pixels
-    float radius_x_ndc = (2.0f * radius_x_pixels) / viewport_width;
-    float radius_y_ndc = (2.0f * radius_y_pixels) / viewport_height;
+    // The radii are already in the correct space due to projection matrix scaling in Jacobian
+    // No additional conversion needed
+    float radius_x_ndc = radius_x;
+    float radius_y_ndc = radius_y;
     
     // DEBUG: Scale up quads to make them visible, but preserve perspective scaling
     // Use distance-based scaling so closer objects are larger
@@ -265,11 +296,8 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     //radius_x_ndc *= scale_factor;
     //radius_y_ndc *= scale_factor;
     
-    // Cap to reasonable size
-    //radius_x_ndc = radius_x_ndc;
-    //radius_y_ndc = radius_y_ndc;
-    radius_x_ndc = fminf(radius_x_ndc, 0.02f);
-    radius_y_ndc = fminf(radius_y_ndc, 0.02f);
+    // No artificial capping needed - let the natural 3σ bounds determine the size
+    // The radii are already computed from the eigenvalues with 3σ scaling
     
     // Store quad parameters (all in NDC space)
     quad_params[quad_offset + 0] = ndc_x;
