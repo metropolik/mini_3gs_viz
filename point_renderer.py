@@ -430,34 +430,34 @@ class PointRenderer:
             self._setup_quad_rendering()
         
         # Render quads if we have any visible ones
-        if visible_count > 0 and False:
+        if visible_count > 0:
             self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count)
         
         # Render quads as points (new method that doesn't require index generation)
-        render_quads_as_points = True
-        if render_quads_as_points:
-            opacities_sorted = cp.asnumpy(gpu_opacities_sorted)
-            self._render_quads_as_points(quad_params, colors_sorted, opacities_sorted, visibility_mask)
-        else:
-            # Original point rendering for comparison/debugging
-            # Create interleaved vertex data with transformed positions and sorted colors
-            vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
-            vertex_data[:, :3] = transformed_positions
-            vertex_data[:, 3:6] = colors_sorted
-            vertex_data = vertex_data.flatten()
+        # render_quads_as_points = False
+        # if render_quads_as_points:
+        #     opacities_sorted = cp.asnumpy(gpu_opacities_sorted)
+        #     self._render_quads_as_points(quad_params, colors_sorted, opacities_sorted, visibility_mask)
+        # else:
+        #     # Original point rendering for comparison/debugging
+        #     # Create interleaved vertex data with transformed positions and sorted colors
+        #     vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
+        #     vertex_data[:, :3] = transformed_positions
+        #     vertex_data[:, 3:6] = colors_sorted
+        #     vertex_data = vertex_data.flatten()
         
-            # Update VBO with transformed data
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-            glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_data.nbytes, vertex_data)
+        #     # Update VBO with transformed data
+        #     glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        #     glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_data.nbytes, vertex_data)
         
-            # Render using shader (no MVP uniform needed)
-            glUseProgram(self.shader_program)
+        #     # Render using shader (no MVP uniform needed)
+        #     glUseProgram(self.shader_program)
         
-            glBindVertexArray(self.vao)
-            glDrawArrays(GL_POINTS, 0, self.num_points)
-            glBindVertexArray(0)
+        #     glBindVertexArray(self.vao)
+        #     glDrawArrays(GL_POINTS, 0, self.num_points)
+        #     glBindVertexArray(0)
         
-            glUseProgram(0)
+        #     glUseProgram(0)
     
     def _setup_quad_rendering(self):
         """Set up OpenGL objects for quad rendering"""

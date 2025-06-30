@@ -268,8 +268,8 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     // Cap to reasonable size
     //radius_x_ndc = radius_x_ndc;
     //radius_y_ndc = radius_y_ndc;
-    radius_x_ndc = fminf(radius_x_ndc, 0.002f);
-    radius_y_ndc = fminf(radius_y_ndc, 0.002f);
+    radius_x_ndc = fminf(radius_x_ndc, 0.02f);
+    radius_y_ndc = fminf(radius_y_ndc, 0.02f);
     
     // Store quad parameters (all in NDC space)
     quad_params[quad_offset + 0] = ndc_x;
@@ -394,8 +394,8 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
         float world_y = evec_y * local_x + evec_x * local_y;
         
         // Store vertex position (in NDC space, z=0 for screen-aligned quads)
-        quad_vertices[vertex_offset + 0] = center_x;// + world_x;
-        quad_vertices[vertex_offset + 1] = center_y;// + world_y;
+        quad_vertices[vertex_offset + 0] = center_x + world_x;
+        quad_vertices[vertex_offset + 1] = center_y + world_y;
         quad_vertices[vertex_offset + 2] = 0.0f;  // Screen-aligned
         
         // Store vertex color
