@@ -368,7 +368,7 @@ class PointRenderer:
         
         # Compute 2D covariance matrices and quad parameters
         gpu_cov2d = cp.zeros((self.num_points, 3), dtype=cp.float32)  # Upper triangle of 2x2 matrix
-        gpu_quad_params = cp.zeros((self.num_points, 4), dtype=cp.float32)  # center_x, center_y, radius_x, radius_y
+        gpu_quad_params = cp.zeros((self.num_points, 5), dtype=cp.float32)  # center_x, center_y, radius_x, radius_y, ndc_z
         gpu_visibility_mask = cp.zeros(self.num_points, dtype=cp.int32)
         
         # Get viewport dimensions for NDC conversion
@@ -510,9 +510,10 @@ class PointRenderer:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
-        # Keep depth testing enabled but disable face culling for debugging
-        glDisable(GL_DEPTH_TEST)
-        glDisable(GL_CULL_FACE)
+        # Enable depth testing with proper depth function
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LESS)  # Draw if fragment is closer to camera
+        glDepthMask(GL_TRUE)  # Enable writing to depth buffer
         
         # Render quads using current shader
         glUseProgram(self.shader_program)
@@ -560,15 +561,16 @@ class PointRenderer:
         
         # Extract quad centers and colors for visible Gaussians
         visible_centers = quad_params[visible_indices, :2]  # center_x, center_y from quad_params
+        visible_z = quad_params[visible_indices, 4]  # ndc_z from quad_params
         visible_colors = colors_sorted[visible_indices]
         visible_opacities = opacities_sorted[visible_indices]
         
-        # Create vertex data for points (x, y, z=0, r, g, b)
+        # Create vertex data for points (x, y, z, r, g, b)
         point_count = len(visible_indices)
         vertex_data = np.zeros((point_count, 6), dtype=np.float32)
         vertex_data[:, 0] = visible_centers[:, 0]  # x in NDC
         vertex_data[:, 1] = visible_centers[:, 1]  # y in NDC
-        vertex_data[:, 2] = 0.0  # z = 0 (already in screen space)
+        vertex_data[:, 2] = visible_z  # z in NDC (with proper depth)
         vertex_data[:, 3:6] = visible_colors
         vertex_data = vertex_data.flatten()
         
