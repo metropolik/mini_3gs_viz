@@ -222,7 +222,8 @@ class PointRenderer:
             self.covariance_kernel = cp.RawKernel(kernel_source, 'compute_2d_covariance')
             self.quad_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_vertices')
             self.index_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_indices')
-            print("Custom transform, covariance, quad generation, and index generation kernels loaded successfully")
+            self.compact_visible_kernel = cp.RawKernel(kernel_source, 'compact_visible_quads')
+            print("Custom transform, covariance, quad generation, index generation, and compaction kernels loaded successfully")
         except Exception as e:
             raise RuntimeError(f"Failed to load transform kernels: {e}")
     
@@ -497,11 +498,28 @@ class PointRenderer:
         self.transform_perspective_kernel((grid_size,), (block_size,), 
                                         (gpu_p, gpu_view_space_sorted, gpu_transformed_positions, self.num_points))
         
-        # Transfer quad data back to CPU for rendering
+        # Use CUDA prefix sum for efficient visible quad compaction
+        # Step 1: Compute prefix sum of visibility mask
+        gpu_prefix_sum = cp.cumsum(gpu_visibility_mask) - gpu_visibility_mask
+        visible_count = int(cp.sum(gpu_visibility_mask))
+        
         if visible_count > 0:
-            quad_vertices = cp.asnumpy(gpu_quad_vertices[:visible_count * 4])
-            quad_uvs = cp.asnumpy(gpu_quad_uvs[:visible_count * 4])
-            quad_data = cp.asnumpy(gpu_quad_data[:visible_count])
+            # Step 2: Allocate output buffers
+            gpu_quad_vertices_compacted = cp.zeros((visible_count * 4, 6), dtype=cp.float32)
+            gpu_quad_uvs_compacted = cp.zeros((visible_count * 4, 2), dtype=cp.float32)
+            gpu_quad_data_compacted = cp.zeros((visible_count, 4), dtype=cp.float32)
+            
+            # Step 3: Launch compaction kernel
+            self.compact_visible_kernel((grid_size,), (block_size,),
+                                      (gpu_quad_vertices, gpu_quad_uvs, gpu_quad_data,
+                                       gpu_visibility_mask, gpu_prefix_sum,
+                                       gpu_quad_vertices_compacted, gpu_quad_uvs_compacted, gpu_quad_data_compacted,
+                                       self.num_points))
+            
+            # Step 4: Transfer compacted data to CPU
+            quad_vertices = cp.asnumpy(gpu_quad_vertices_compacted)
+            quad_uvs = cp.asnumpy(gpu_quad_uvs_compacted)
+            quad_data = cp.asnumpy(gpu_quad_data_compacted)
         else:
             quad_vertices = np.array([], dtype=np.float32)
             quad_uvs = np.array([], dtype=np.float32)

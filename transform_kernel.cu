@@ -319,6 +319,49 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     visibility_mask[idx] = 1;
 }
 
+// Compact visible quads using prefix sum - maintains sorted order
+extern "C" __global__
+void compact_visible_quads(const float* quad_vertices_in,       // Input quad vertices (all quads)
+                          const float* quad_uvs_in,            // Input UV coordinates (all quads)  
+                          const float* quad_data_in,           // Input quad data (all quads)
+                          const int* visibility_mask,         // Visibility mask
+                          const int* prefix_sum,               // Prefix sum of visibility mask
+                          float* quad_vertices_out,            // Output: compacted quad vertices
+                          float* quad_uvs_out,                 // Output: compacted UV coordinates
+                          float* quad_data_out,                // Output: compacted quad data
+                          int num_points) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx >= num_points) return;
+    
+    // Skip if not visible
+    if (visibility_mask[idx] == 0) return;
+    
+    // Get output index from prefix sum (maintains sorted order)
+    int output_idx = prefix_sum[idx];
+    
+    // Copy quad vertices (4 vertices per quad)
+    for (int v = 0; v < 4; v++) {
+        int input_vertex_idx = idx * 4 + v;
+        int output_vertex_idx = output_idx * 4 + v;
+        
+        // Copy vertex data (6 floats per vertex: x,y,z,r,g,b)
+        for (int f = 0; f < 6; f++) {
+            quad_vertices_out[output_vertex_idx * 6 + f] = quad_vertices_in[input_vertex_idx * 6 + f];
+        }
+        
+        // Copy UV data (2 floats per vertex: u,v)
+        for (int f = 0; f < 2; f++) {
+            quad_uvs_out[output_vertex_idx * 2 + f] = quad_uvs_in[input_vertex_idx * 2 + f];
+        }
+    }
+    
+    // Copy quad data (4 floats per quad: opacity, inv_cov components)
+    for (int f = 0; f < 4; f++) {
+        quad_data_out[output_idx * 4 + f] = quad_data_in[idx * 4 + f];
+    }
+}
+
 // Generate quad vertices for visible Gaussians
 extern "C" __global__
 void generate_quad_vertices(const float* quad_params,           // Quad parameters (center_x, center_y, radius_x, radius_y, ndc_z)
@@ -351,8 +394,9 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
         return;
     }
     
-    // Get atomic counter for visible quad index (only after validation)
-    int quad_idx = atomicAdd(visible_count, 1);
+    // Use the original sorted index to maintain depth order
+    // Don't use atomic counter as it breaks sorting
+    int quad_idx = idx;
     
     // DEBUG: Print first quad generation
     // if (idx == 0) {
