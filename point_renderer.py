@@ -50,10 +50,12 @@ class PointRenderer:
         layout (location = 1) in vec3 aColor;    // Vertex color
         layout (location = 2) in vec2 aUV;       // UV coordinates
         layout (location = 3) in vec4 aQuadData; // Per-quad data (opacity, inv_cov_00, inv_cov_01, inv_cov_11)
+        layout (location = 4) in vec2 aQuadRadii; // Per-quad radii (radius_x, radius_y)
         
         out vec3 fragColor;
         out vec2 fragUV;
         out vec4 quadData;
+        out vec2 quadRadii;
         
         void main()
         {
@@ -61,6 +63,7 @@ class PointRenderer:
             fragColor = aColor;
             fragUV = aUV;
             quadData = aQuadData;
+            quadRadii = aQuadRadii;
         }
         """
         
@@ -69,6 +72,7 @@ class PointRenderer:
         in vec3 fragColor;
         in vec2 fragUV;
         in vec4 quadData;  // opacity, inv_cov_00, inv_cov_01, inv_cov_11
+        in vec2 quadRadii; // radius_x, radius_y (NDC extents)
         
         out vec4 FragColor;
         
@@ -79,15 +83,16 @@ class PointRenderer:
             float inv_cov_01 = quadData.z;
             float inv_cov_11 = quadData.w;
             
-            // Back to simple fixed mapping - but with a better scale
-            // Map UV [0,1] to [-3,3] since quads are at 3-sigma bounds
-            vec2 d = (fragUV - 0.5) * 6.0;
+            // MATHEMATICALLY CORRECT UV MAPPING
+            // Map UV [0,1] to actual NDC extent of this specific quad
+            // Each quad extends from -radius to +radius in NDC space
+            vec2 d = (fragUV - 0.5) * 2.0 * quadRadii;
             
-            // Use a fixed scale that should work better
-            float fixed_scale = 0.001;
-            float scaled_inv_cov_00 = inv_cov_00 * fixed_scale;
-            float scaled_inv_cov_01 = inv_cov_01 * fixed_scale;
-            float scaled_inv_cov_11 = inv_cov_11 * fixed_scale;
+            // NO SCALING HACK NEEDED!
+            // Both d and inv_cov are now in the same NDC coordinate space
+            float scaled_inv_cov_00 = inv_cov_00;
+            float scaled_inv_cov_01 = inv_cov_01;
+            float scaled_inv_cov_11 = inv_cov_11;
             
             // Compute Gaussian weight: exp(-0.5 * d^T * inv_cov * d)
             float exponent = -0.5 * (d.x * d.x * scaled_inv_cov_00 + 
@@ -474,7 +479,7 @@ class PointRenderer:
         max_quads = self.num_points  # Maximum possible number of quads
         gpu_quad_vertices = cp.zeros((max_quads * 4, 6), dtype=cp.float32)  # 4 vertices per quad, 6 floats per vertex
         gpu_quad_uvs = cp.zeros((max_quads * 4, 2), dtype=cp.float32)       # 4 vertices per quad, 2 UV per vertex
-        gpu_quad_data = cp.zeros((max_quads, 4), dtype=cp.float32)          # Per-quad data (opacity + inverse covariance)
+        gpu_quad_data = cp.zeros((max_quads, 6), dtype=cp.float32)          # Per-quad data (opacity + inverse covariance + radii)
         gpu_visible_count = cp.zeros(1, dtype=cp.int32)                    # Counter for visible quads
         
         self.quad_generation_kernel((grid_size,), (block_size,),
@@ -500,7 +505,7 @@ class PointRenderer:
             # Step 2: Allocate output buffers
             gpu_quad_vertices_compacted = cp.zeros((visible_count * 4, 6), dtype=cp.float32)
             gpu_quad_uvs_compacted = cp.zeros((visible_count * 4, 2), dtype=cp.float32)
-            gpu_quad_data_compacted = cp.zeros((visible_count, 4), dtype=cp.float32)
+            gpu_quad_data_compacted = cp.zeros((visible_count, 6), dtype=cp.float32)
             
             # Step 3: Launch compaction kernel
             self.compact_visible_kernel((grid_size,), (block_size,),
@@ -572,7 +577,8 @@ class PointRenderer:
         self.quad_vao = glGenVertexArrays(1)
         self.quad_vbo = glGenBuffers(1)           # Vertex positions and colors
         self.quad_uv_vbo = glGenBuffers(1)        # UV coordinates
-        self.quad_data_vbo = glGenBuffers(1)      # Per-quad data (opacity, inverse covariance)
+        self.quad_data_vbo = glGenBuffers(1)      # Per-quad data part 1 (opacity, inverse covariance)
+        self.quad_radii_vbo = glGenBuffers(1)     # Per-quad data part 2 (radii)
         
         glBindVertexArray(self.quad_vao)
         
@@ -588,13 +594,16 @@ class PointRenderer:
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 2 * 4, None)           # UV coordinates
         glEnableVertexAttribArray(2)
         
-        # Set up per-quad data buffer (4 floats per quad: opacity, inv_cov_00, inv_cov_01, inv_cov_11)
+        # Set up per-quad data buffer part 1 (4 floats per quad: opacity, inv_cov_00, inv_cov_01, inv_cov_11)
         # This data needs to be duplicated for each vertex of the quad
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
-        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 4 * 4, None)           # Quad data
+        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 4 * 4, None)           # Quad data part 1
         glEnableVertexAttribArray(3)
-        # Remove divisor - we'll duplicate the data per vertex instead
-        # glVertexAttribDivisor(3, 4)  # Advance per 4 vertices (one quad)
+        
+        # Set up per-quad data buffer part 2 (2 floats per quad: radius_x, radius_y)
+        glBindBuffer(GL_ARRAY_BUFFER, self.quad_radii_vbo)
+        glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, 2 * 4, None)           # Quad radii
+        glEnableVertexAttribArray(4)
         
         glBindVertexArray(0)
         print("Quad rendering setup complete")
@@ -609,11 +618,19 @@ class PointRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_uv_vbo)
         glBufferData(GL_ARRAY_BUFFER, quad_uvs.nbytes, quad_uvs, GL_DYNAMIC_DRAW)
         
-        # Update per-quad data buffer - duplicate data for each vertex
-        # Each quad has 4 vertices, so we need to duplicate the data 4 times
-        quad_data_per_vertex = np.repeat(quad_data, 4, axis=0)
+        # Split 6-component quad data into two parts
+        quad_data_part1 = quad_data[:, :4]  # opacity, inv_cov (3 components)
+        quad_radii_data = quad_data[:, 4:]   # radii (2 components)
+        
+        # Update per-quad data buffer part 1 - duplicate data for each vertex
+        quad_data_part1_per_vertex = np.repeat(quad_data_part1, 4, axis=0)
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
-        glBufferData(GL_ARRAY_BUFFER, quad_data_per_vertex.nbytes, quad_data_per_vertex, GL_DYNAMIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, quad_data_part1_per_vertex.nbytes, quad_data_part1_per_vertex, GL_DYNAMIC_DRAW)
+        
+        # Update per-quad radii buffer - duplicate data for each vertex
+        quad_radii_per_vertex = np.repeat(quad_radii_data, 4, axis=0)
+        glBindBuffer(GL_ARRAY_BUFFER, self.quad_radii_vbo)
+        glBufferData(GL_ARRAY_BUFFER, quad_radii_per_vertex.nbytes, quad_radii_per_vertex, GL_DYNAMIC_DRAW)
         
         # Enable alpha blending for proper Gaussian splatting
         glEnable(GL_BLEND)
@@ -717,6 +734,8 @@ class PointRenderer:
             glDeleteBuffers(1, [self.quad_uv_vbo])
         if self.quad_data_vbo:
             glDeleteBuffers(1, [self.quad_data_vbo])
+        if self.quad_radii_vbo:
+            glDeleteBuffers(1, [self.quad_radii_vbo])
         if self.shader_program:
             glDeleteProgram(self.shader_program)
         if self.gaussian_shader_program:

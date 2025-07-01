@@ -356,9 +356,9 @@ void compact_visible_quads(const float* quad_vertices_in,       // Input quad ve
         }
     }
     
-    // Copy quad data (4 floats per quad: opacity, inv_cov components)
-    for (int f = 0; f < 4; f++) {
-        quad_data_out[output_idx * 4 + f] = quad_data_in[idx * 4 + f];
+    // Copy quad data (6 floats per quad: opacity, inv_cov components, radii)
+    for (int f = 0; f < 6; f++) {
+        quad_data_out[output_idx * 6 + f] = quad_data_in[idx * 6 + f];
     }
 }
 
@@ -487,7 +487,7 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
         quad_vertices[vertex_offset + 1] = center_y + world_y;
         quad_vertices[vertex_offset + 2] = ndc_z;  // Use the NDC z-coordinate for proper depth
         
-        // Store vertex color
+        // Store vertex color normally
         quad_vertices[vertex_offset + 3] = r;
         quad_vertices[vertex_offset + 4] = g;
         quad_vertices[vertex_offset + 5] = b;
@@ -498,11 +498,14 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     }
     
     // Store per-quad data for fragment shader
-    int quad_data_offset = quad_idx * 4;  // opacity + 3 inverse covariance components
+    // Extend to 6 components: opacity, inv_cov (3), radii (2)
+    int quad_data_offset = quad_idx * 6;
     quad_data[quad_data_offset + 0] = opacity;
     quad_data[quad_data_offset + 1] = inv_cov_00;
     quad_data[quad_data_offset + 2] = inv_cov_01;
     quad_data[quad_data_offset + 3] = inv_cov_11;
+    quad_data[quad_data_offset + 4] = radius_x;  // NDC radius in X direction
+    quad_data[quad_data_offset + 5] = radius_y;  // NDC radius in Y direction
 }
 
 // Generate indices for rendering quads as triangles
