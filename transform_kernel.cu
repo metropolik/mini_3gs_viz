@@ -98,7 +98,7 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
                           const float* mv_matrix,               // Model-view matrix (4x4)
                           const float* proj_matrix,             // Projection matrix (4x4)
                           float* cov2d_data,                    // Output: 2D covariance matrices (3 components: cov[0,0], cov[0,1], cov[1,1])
-                          float* quad_params,                   // Output: Quad parameters (4 components: center_x, center_y, radius_x, radius_y)
+                          float* quad_params,                   // Output: Quad parameters (5 components: center_x, center_y, radius_x, radius_y, ndc_z)
                           int* visibility_mask,                 // Output: Visibility mask (1 if visible, 0 if culled)
                           float viewport_width,                 // Viewport width in pixels
                           float viewport_height,                // Viewport height in pixels
@@ -112,7 +112,7 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     int scale_offset = idx * 3;
     int rot_offset = idx * 4;
     int cov_offset = idx * 3;
-    int quad_offset = idx * 4;
+    int quad_offset = idx * 5;
     
     // Load view space position
     float vx = view_space_positions[pos_offset + 0];
@@ -128,6 +128,8 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
         quad_params[quad_offset + 1] = 0.0f;
         quad_params[quad_offset + 2] = 0.0f;
         quad_params[quad_offset + 3] = 0.0f;
+        quad_params[quad_offset + 4] = 0.0f;
+        quad_params[quad_offset + 4] = 0.0f;
         return;
     }
     
@@ -238,6 +240,8 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
         quad_params[quad_offset + 1] = 0.0f;
         quad_params[quad_offset + 2] = 0.0f;
         quad_params[quad_offset + 3] = 0.0f;
+        quad_params[quad_offset + 4] = 0.0f;
+        quad_params[quad_offset + 4] = 0.0f;
         return;
     }
     
@@ -265,6 +269,8 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
         quad_params[quad_offset + 1] = 0.0f;
         quad_params[quad_offset + 2] = 0.0f;
         quad_params[quad_offset + 3] = 0.0f;
+        quad_params[quad_offset + 4] = 0.0f;
+        quad_params[quad_offset + 4] = 0.0f;
         return;
     }
     
@@ -279,6 +285,7 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
         quad_params[quad_offset + 1] = 0.0f;
         quad_params[quad_offset + 2] = 0.0f;
         quad_params[quad_offset + 3] = 0.0f;
+        quad_params[quad_offset + 4] = 0.0f;
         return;
     }
     
@@ -304,6 +311,7 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     quad_params[quad_offset + 1] = ndc_y;
     quad_params[quad_offset + 2] = radius_x_ndc;
     quad_params[quad_offset + 3] = radius_y_ndc;
+    quad_params[quad_offset + 4] = ndc_z;  // Store NDC z for depth
     
     // Mark as visible
     visibility_mask[idx] = 1;
@@ -311,7 +319,7 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
 
 // Generate quad vertices for visible Gaussians
 extern "C" __global__
-void generate_quad_vertices(const float* quad_params,           // Quad parameters (center_x, center_y, radius_x, radius_y)
+void generate_quad_vertices(const float* quad_params,           // Quad parameters (center_x, center_y, radius_x, radius_y, ndc_z)
                            const float* cov2d_data,             // 2D covariance matrices (3 components each)
                            const int* visibility_mask,         // Visibility mask
                            const float* colors,                // Colors (3 components each)
@@ -329,11 +337,12 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     if (visibility_mask[idx] == 0) return;
     
     // Load quad parameters and check validity first
-    int param_offset = idx * 4;
+    int param_offset = idx * 5;
     float center_x = quad_params[param_offset + 0];
     float center_y = quad_params[param_offset + 1];
     float radius_x = quad_params[param_offset + 2];
     float radius_y = quad_params[param_offset + 3];
+    float ndc_z = quad_params[param_offset + 4];
     
     // Skip if quad parameters are invalid (zero radius means it was culled)
     if (radius_x <= 0.0f || radius_y <= 0.0f) {
@@ -421,10 +430,10 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
         float world_x = evec_x * local_x - evec_y * local_y;
         float world_y = evec_y * local_x + evec_x * local_y;
         
-        // Store vertex position (in NDC space, z=0 for screen-aligned quads)
+        // Store vertex position (in NDC space with proper depth)
         quad_vertices[vertex_offset + 0] = center_x + world_x;
         quad_vertices[vertex_offset + 1] = center_y + world_y;
-        quad_vertices[vertex_offset + 2] = 0.0f;  // Screen-aligned
+        quad_vertices[vertex_offset + 2] = ndc_z;  // Use the NDC z-coordinate for proper depth
         
         // Store vertex color
         quad_vertices[vertex_offset + 3] = r;
