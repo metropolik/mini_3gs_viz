@@ -74,39 +74,36 @@ class PointRenderer:
         
         void main()
         {
-            // DEBUG: Check what data we're receiving
             float opacity = quadData.x;
             float inv_cov_00 = quadData.y;
             float inv_cov_01 = quadData.z;
             float inv_cov_11 = quadData.w;
             
-            // Convert UV from [0,1] to [-1,1] centered at Gaussian center
+            // Convert UV from [0,1] to [-1,1] for simple mapping
             vec2 d = (fragUV - 0.5) * 2.0;
             
-            // DEBUG: Scale down the inverse covariance values - they might be too large
-            float scale_factor = 0.01;  // Try much smaller values
-            inv_cov_00 *= scale_factor;
-            inv_cov_01 *= scale_factor;
-            inv_cov_11 *= scale_factor;
+            // The inverse covariance values are very large (~6000), so scale them down significantly
+            // Start with a much smaller scale factor and adjust as needed
+            float scale = 0.0001; // Much smaller scale
+            float scaled_inv_cov_00 = inv_cov_00 * scale;
+            float scaled_inv_cov_01 = inv_cov_01 * scale;
+            float scaled_inv_cov_11 = inv_cov_11 * scale;
             
             // Compute Gaussian weight: exp(-0.5 * d^T * inv_cov * d)
-            // d^T * inv_cov * d = d.x * (inv_cov_00 * d.x + inv_cov_01 * d.y) + 
-            //                     d.y * (inv_cov_01 * d.x + inv_cov_11 * d.y)
-            float exponent = -0.5 * (d.x * d.x * inv_cov_00 + 
-                                    2.0 * d.x * d.y * inv_cov_01 + 
-                                    d.y * d.y * inv_cov_11);
+            float exponent = -0.5 * (d.x * d.x * scaled_inv_cov_00 + 
+                                    2.0 * d.x * d.y * scaled_inv_cov_01 + 
+                                    d.y * d.y * scaled_inv_cov_11);
             
             // Clamp to prevent numerical issues
             exponent = max(exponent, -10.0);
             
             float alpha = opacity * exp(exponent);
             
-            // DEBUG: Boost alpha visibility and clamp to see the Gaussian shape
-            alpha = clamp(alpha * 10.0, 0.0, 1.0);  // Boost and clamp
+            // Clamp alpha to valid range
+            alpha = clamp(alpha, 0.0, 1.0);
             
-            // DEBUG: Disable transparency - show Gaussian intensity as grayscale
-            // Black where Gaussian is weak, colored where strong
-            FragColor = vec4(fragColor * alpha, 1.0);  // Force full opacity
+            // Output with color modulated by Gaussian
+            FragColor = vec4(fragColor * alpha, 1.0);  // No transparency for now
         }
         """
         

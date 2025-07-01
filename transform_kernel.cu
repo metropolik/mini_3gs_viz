@@ -211,14 +211,15 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float j12 = fy * vy * inv_z2;
     
     // Compute 2D covariance: Σ_2D = J * Σ_view * J^T
-    // Only need upper triangle since matrix is symmetric
+    // The Jacobian includes depth derivatives which are important
     float cov2d_00 = j00*j00*cov_view_00 + j02*j02*cov_view_22 + 2.0f*j00*j02*cov_view_02;
-    float cov2d_01 = j00*j11*cov_view_01 + j02*j12*cov_view_12 + j00*j12*cov_view_02 + j02*j11*cov_view_02;
+    float cov2d_01 = j00*j11*cov_view_01 + j02*j12*cov_view_12 + j00*j12*cov_view_12 + j02*j11*cov_view_01;
     float cov2d_11 = j11*j11*cov_view_11 + j12*j12*cov_view_22 + 2.0f*j11*j12*cov_view_12;
     
-    // Add a small regularization term to ensure positive definiteness
-    cov2d_00 += 1e-6f;
-    cov2d_11 += 1e-6f;
+    // Add a larger regularization term to ensure positive definiteness
+    // This also helps with numerical stability
+    cov2d_00 += 1e-4f;
+    cov2d_11 += 1e-4f;
     
     // Store 2D covariance (symmetric, so store upper triangle)
     cov2d_data[cov_offset + 0] = cov2d_00;
@@ -259,6 +260,7 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     //     printf("DEBUG CUDA: First gaussian eigenvalues: lambda1=%f, lambda2=%f\n", lambda1, lambda2);
     //     printf("DEBUG CUDA: Radii in NDC: rx=%f, ry=%f\n", radius_x, radius_y);
     //     printf("DEBUG CUDA: Discriminant=%f, trace=%f, det=%f\n", discriminant, trace, det);
+    //     printf("DEBUG CUDA: 2D Covariance: [[%f, %f], [%f, %f]]\n", cov2d_00, cov2d_01, cov2d_01, cov2d_11);
     // }
     
     // Cull if quad would be too small in NDC (less than 1e-6 - very permissive)
@@ -383,6 +385,12 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     float inv_cov_00 = cov_11 * inv_det;
     float inv_cov_01 = -cov_01 * inv_det;
     float inv_cov_11 = cov_00 * inv_det;
+    
+    // DEBUG: Print inverse covariance for first quad
+    // if (idx == 0) {
+    //     printf("DEBUG QUAD GEN: inv_cov=[[%f, %f], [%f, %f]]\n", 
+    //            inv_cov_00, inv_cov_01, inv_cov_01, inv_cov_11);
+    // }
     
     // Load color and opacity
     int color_offset = idx * 3;
