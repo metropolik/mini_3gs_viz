@@ -109,8 +109,8 @@ class PointRenderer:
             // Clamp alpha to valid range
             alpha = clamp(alpha, 0.0, 1.0);
             
-            // Output with color modulated by Gaussian
-            FragColor = vec4(fragColor * alpha, 1.0);  // No transparency for now
+            // Output with proper alpha blending - color is full strength, alpha varies
+            FragColor = vec4(fragColor, alpha);
         }
         """
         
@@ -604,15 +604,14 @@ class PointRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
         glBufferData(GL_ARRAY_BUFFER, quad_data_per_vertex.nbytes, quad_data_per_vertex, GL_DYNAMIC_DRAW)
         
-        # DEBUG: Disable alpha blending to see all quads
-        glDisable(GL_BLEND)
-        # glEnable(GL_BLEND)
-        # glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        # Enable alpha blending for proper Gaussian splatting
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
-        # Enable depth testing with proper depth function
+        # Enable depth testing but disable depth writing for alpha blending
         glEnable(GL_DEPTH_TEST)
         glDepthFunc(GL_LESS)  # Draw if fragment is closer to camera
-        glDepthMask(GL_TRUE)  # Enable writing to depth buffer
+        glDepthMask(GL_FALSE)  # Disable writing to depth buffer for transparent objects
         
         # Render quads using Gaussian shader
         glUseProgram(self.gaussian_shader_program)
@@ -649,7 +648,8 @@ class PointRenderer:
         
         glBindVertexArray(0)
         glUseProgram(0)
-        # glDisable(GL_BLEND)  # Already disabled for debugging
+        glDisable(GL_BLEND)  # Clean up blending state
+        glDepthMask(GL_TRUE)  # Restore depth writing
     
     def _render_quads_as_points(self, quad_params, colors_sorted, opacities_sorted, visibility_mask):
         """Render quad centers as points without index generation"""
