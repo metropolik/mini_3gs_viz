@@ -79,15 +79,22 @@ class PointRenderer:
             float inv_cov_01 = quadData.z;
             float inv_cov_11 = quadData.w;
             
-            // Convert UV from [0,1] to [-1,1] for simple mapping
-            vec2 d = (fragUV - 0.5) * 2.0;
+            // Convert UV from [0,1] to [-3,3] since quads extend to 3-sigma bounds
+            vec2 d = (fragUV - 0.5) * 6.0;
             
-            // The inverse covariance values are very large (~6000), so scale them down significantly
-            // Start with a much smaller scale factor and adjust as needed
-            float scale = 0.0001; // Much smaller scale
-            float scaled_inv_cov_00 = inv_cov_00 * scale;
-            float scaled_inv_cov_01 = inv_cov_01 * scale;
-            float scaled_inv_cov_11 = inv_cov_11 * scale;
+            // Adaptive scaling based on the magnitude of the inverse covariance
+            // The inverse covariance changes dramatically with camera distance
+            // Use the trace (sum of diagonal elements) as a measure of magnitude
+            float inv_cov_magnitude = (inv_cov_00 + inv_cov_11) * 0.5;
+            
+            // Scale inversely proportional to magnitude to normalize across distances
+            // Target a specific range for the scaled values
+            float target_magnitude = 1.0; // Target magnitude for good Gaussian shape
+            float adaptive_scale = target_magnitude / max(inv_cov_magnitude, 0.001);
+            
+            float scaled_inv_cov_00 = inv_cov_00 * adaptive_scale;
+            float scaled_inv_cov_01 = inv_cov_01 * adaptive_scale;
+            float scaled_inv_cov_11 = inv_cov_11 * adaptive_scale;
             
             // Compute Gaussian weight: exp(-0.5 * d^T * inv_cov * d)
             float exponent = -0.5 * (d.x * d.x * scaled_inv_cov_00 + 
