@@ -49,7 +49,7 @@ class PointRenderer:
         layout (location = 0) in vec3 aPos;      // Vertex position in NDC
         layout (location = 1) in vec3 aColor;    // Vertex color
         layout (location = 2) in vec2 aUV;       // UV coordinates
-        layout (location = 3) in vec4 aQuadData; // Per-quad data (opacity, inv_cov components)
+        layout (location = 3) in vec4 aQuadData; // Per-quad data (opacity, inv_cov_00, inv_cov_01, inv_cov_11)
         
         out vec3 fragColor;
         out vec2 fragUV;
@@ -79,14 +79,12 @@ class PointRenderer:
             float inv_cov_01 = quadData.z;
             float inv_cov_11 = quadData.w;
             
-            // Convert UV from [0,1] to [-3,3] since quads extend to 3-sigma bounds
+            // Back to simple fixed mapping - but with a better scale
+            // Map UV [0,1] to [-3,3] since quads are at 3-sigma bounds
             vec2 d = (fragUV - 0.5) * 6.0;
             
-            // Try a more conservative scaling approach that preserves relative shapes
-            // The issue with adaptive scaling is it makes all Gaussians look the same
-            // Let's use a fixed scale that works reasonably at different distances
-            float fixed_scale = 0.001; // Start with this and we can adjust if needed
-            
+            // Use a fixed scale that should work better
+            float fixed_scale = 0.001;
             float scaled_inv_cov_00 = inv_cov_00 * fixed_scale;
             float scaled_inv_cov_01 = inv_cov_01 * fixed_scale;
             float scaled_inv_cov_11 = inv_cov_11 * fixed_scale;
