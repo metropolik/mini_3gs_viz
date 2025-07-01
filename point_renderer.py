@@ -574,11 +574,12 @@ class PointRenderer:
         glEnableVertexAttribArray(2)
         
         # Set up per-quad data buffer (4 floats per quad: opacity, inv_cov_00, inv_cov_01, inv_cov_11)
-        # This will be instanced - each quad gets one set of data
+        # This data needs to be duplicated for each vertex of the quad
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
         glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 4 * 4, None)           # Quad data
         glEnableVertexAttribArray(3)
-        glVertexAttribDivisor(3, 4)  # Advance per 4 vertices (one quad)
+        # Remove divisor - we'll duplicate the data per vertex instead
+        # glVertexAttribDivisor(3, 4)  # Advance per 4 vertices (one quad)
         
         glBindVertexArray(0)
         print("Quad rendering setup complete")
@@ -593,9 +594,11 @@ class PointRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_uv_vbo)
         glBufferData(GL_ARRAY_BUFFER, quad_uvs.nbytes, quad_uvs, GL_DYNAMIC_DRAW)
         
-        # Update per-quad data buffer
+        # Update per-quad data buffer - duplicate data for each vertex
+        # Each quad has 4 vertices, so we need to duplicate the data 4 times
+        quad_data_per_vertex = np.repeat(quad_data, 4, axis=0)
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
-        glBufferData(GL_ARRAY_BUFFER, quad_data.nbytes, quad_data, GL_DYNAMIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, quad_data_per_vertex.nbytes, quad_data_per_vertex, GL_DYNAMIC_DRAW)
         
         # DEBUG: Disable alpha blending to see all quads
         glDisable(GL_BLEND)
