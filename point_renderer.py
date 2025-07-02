@@ -93,16 +93,24 @@ class PointRenderer:
             vec2 fragNDC = (gl_FragCoord.xy / viewport) * 2.0 - 1.0;
             
             // Calculate distance from fragment to Gaussian center in NDC space
-            vec2 d_ndc = fragNDC - gaussianCenter;
+            vec2 d = fragNDC - gaussianCenter;
             
-            float exponent_ndc = -0.5 * (d_ndc.x * d_ndc.x * inv_cov_00 + 
-                                        2.0 * d_ndc.x * d_ndc.y * inv_cov_01 + 
-                                        d_ndc.y * d_ndc.y * inv_cov_11);
+            // Evaluate Gaussian function
+            float exponent = -0.5 * (d.x * d.x * inv_cov_00 + 
+                                    2.0 * d.x * d.y * inv_cov_01 + 
+                                    d.y * d.y * inv_cov_11);
             
-            exponent_ndc = max(exponent_ndc, -10.0);
-            float alpha_ndc = opacity * exp(exponent_ndc);
-            alpha_ndc = clamp(alpha_ndc, 0.0, 1.0);
-            FragColor = vec4(fragColor, alpha_ndc);
+            exponent = max(exponent, -10.0);
+            float alpha = opacity * exp(exponent);
+            alpha = clamp(alpha, 0.0, 1.0);
+            
+            // DEBUG: Visualize distance from center with color gradient
+            // Uncomment to see distance visualization
+            // float dist = length(d) * 10.0; // Scale for visibility
+            // FragColor = vec4(dist, 1.0 - dist, 0.0, alpha);
+            // return;
+            
+            FragColor = vec4(fragColor, alpha);
         }
         """
         
