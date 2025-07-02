@@ -114,9 +114,43 @@ class PointRenderer:
         }
         """
         
+        # Instanced rendering shaders
+        self.instanced_vertex_shader_source = """
+        #version 330 core
+        // Per-vertex attributes (base quad)
+        layout (location = 0) in vec2 aQuadVertex;  // Base quad vertex position (-1 to 1)
+        
+        // Per-instance attributes
+        layout (location = 1) in vec3 aInstanceCenter;    // center_x, center_y, ndc_z
+        layout (location = 2) in vec3 aInstanceColor;     // r, g, b
+        layout (location = 3) in vec4 aInstanceCovariance; // opacity, inv_cov_00, inv_cov_01, inv_cov_11
+        
+        out vec3 fragColor;
+        out vec2 gaussianCenter;
+        out vec4 quadData;
+        
+        void main()
+        {
+            // For now, create simple axis-aligned quads
+            // TODO: Use covariance for proper orientation
+            float quadSize = 0.05; // Fixed size for testing
+            
+            vec3 position;
+            position.xy = aInstanceCenter.xy + aQuadVertex * quadSize;
+            position.z = aInstanceCenter.z;
+            
+            gl_Position = vec4(position, 1.0);
+            
+            fragColor = aInstanceColor;
+            gaussianCenter = aInstanceCenter.xy;
+            quadData = aInstanceCovariance;
+        }
+        """
+        
         # OpenGL objects
         self.shader_program = None
         self.gaussian_shader_program = None  # Shader program for Gaussian quads
+        self.instanced_shader_program = None  # Shader program for instanced rendering
         self.vao = None
         self.vbo = None
         self.quad_vao = None        # VAO for quad rendering
@@ -124,6 +158,8 @@ class PointRenderer:
         self.quad_uv_vbo = None     # VBO for UV coordinates
         self.quad_data_vbo = None   # VBO for per-quad data
         self.instance_vbo = None    # VBO for instance data (for future instanced rendering)
+        self.base_quad_vbo = None   # VBO for base quad geometry
+        self.instanced_vao = None   # VAO for instanced rendering
         self.num_points = 0
         
         # CPU transformation objects
@@ -148,6 +184,7 @@ class PointRenderer:
         if ply_path and os.path.exists(ply_path):
             self._setup_shaders()
             self._setup_gaussian_shaders()
+            self._setup_instanced_shaders()
             self._load_ply()
             # Enable point size control
             glEnable(GL_PROGRAM_POINT_SIZE)
@@ -214,6 +251,32 @@ class PointRenderer:
         
         # Get uniform location for viewport
         self.viewport_uniform = glGetUniformLocation(self.gaussian_shader_program, "viewport")
+    
+    def _setup_instanced_shaders(self):
+        """Create and compile instanced rendering shaders"""
+        print("Setting up instanced rendering shaders...")
+        
+        # Compile shaders
+        vertex_shader = self._compile_shader(self.instanced_vertex_shader_source, GL_VERTEX_SHADER)
+        # Use the same fragment shader as the regular Gaussian shader
+        fragment_shader = self._compile_shader(self.gaussian_fragment_shader_source, GL_FRAGMENT_SHADER)
+        
+        # Create shader program
+        self.instanced_shader_program = glCreateProgram()
+        glAttachShader(self.instanced_shader_program, vertex_shader)
+        glAttachShader(self.instanced_shader_program, fragment_shader)
+        glLinkProgram(self.instanced_shader_program)
+        
+        if not glGetProgramiv(self.instanced_shader_program, GL_LINK_STATUS):
+            error = glGetProgramInfoLog(self.instanced_shader_program).decode()
+            raise RuntimeError(f"Instanced program linking failed: {error}")
+        
+        # Clean up shaders
+        glDeleteShader(vertex_shader)
+        glDeleteShader(fragment_shader)
+        
+        # Get uniform location for viewport
+        self.instanced_viewport_uniform = glGetUniformLocation(self.instanced_shader_program, "viewport")
     
     def _load_transform_kernel(self):
         """Load the custom CUDA transform kernels"""
@@ -502,9 +565,20 @@ class PointRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
         glBufferData(GL_ARRAY_BUFFER, instance_data.nbytes, instance_data, GL_DYNAMIC_DRAW)
         
-        # Render quads if we have any visible ones
-        if visible_count > 0:
-            self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count, viewport_width, viewport_height)
+        # Toggle for A/B testing - use instanced rendering
+        use_instanced_rendering = True  # Set to True to use instanced rendering
+        
+        if use_instanced_rendering:
+            # Set up instanced rendering if not done
+            if self.instanced_vao is None:
+                self._setup_instanced_rendering()
+            
+            # Render using instanced rendering
+            self._render_instanced(self.num_points, viewport_width, viewport_height)
+        else:
+            # Render quads if we have any visible ones (old method)
+            if visible_count > 0:
+                self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count, viewport_width, viewport_height)
         
         # Render quads as points (new method that doesn't require index generation)
         # render_quads_as_points = False
@@ -570,6 +644,67 @@ class PointRenderer:
         
         glBindVertexArray(0)
         print("Quad rendering setup complete")
+    
+    def _setup_instanced_rendering(self):
+        """Set up OpenGL objects for instanced rendering"""
+        if self.instanced_vao is not None:
+            return  # Already set up
+            
+        print("Setting up instanced rendering...")
+        
+        # Create base quad vertices (2D positions)
+        base_quad = np.array([
+            [-1.0, -1.0],  # Bottom-left
+            [ 1.0, -1.0],  # Bottom-right
+            [-1.0,  1.0],  # Top-left
+            [ 1.0,  1.0],  # Top-right
+        ], dtype=np.float32).flatten()
+        
+        # Create indices for two triangles
+        indices = np.array([0, 1, 2, 1, 3, 2], dtype=np.uint32)
+        
+        # Create VAO and VBOs
+        self.instanced_vao = glGenVertexArrays(1)
+        self.base_quad_vbo = glGenBuffers(1)
+        self.base_quad_ibo = glGenBuffers(1)
+        
+        glBindVertexArray(self.instanced_vao)
+        
+        # Set up base quad vertices
+        glBindBuffer(GL_ARRAY_BUFFER, self.base_quad_vbo)
+        glBufferData(GL_ARRAY_BUFFER, base_quad.nbytes, base_quad, GL_STATIC_DRAW)
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, None)
+        glEnableVertexAttribArray(0)
+        
+        # Set up index buffer
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.base_quad_ibo)
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
+        
+        # Set up instance buffer attributes
+        if self.instance_vbo is not None:
+            glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
+            
+            # Instance data layout: 10 floats per instance
+            # center_x, center_y, ndc_z, r, g, b, opacity, inv_cov_00, inv_cov_01, inv_cov_11
+            stride = 10 * 4  # 10 floats * 4 bytes
+            
+            # Center position (location = 1)
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+            glEnableVertexAttribArray(1)
+            glVertexAttribDivisor(1, 1)  # One per instance
+            
+            # Color (location = 2)
+            glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(3 * 4))
+            glEnableVertexAttribArray(2)
+            glVertexAttribDivisor(2, 1)  # One per instance
+            
+            # Covariance data (location = 3)
+            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(6 * 4))
+            glEnableVertexAttribArray(3)
+            glVertexAttribDivisor(3, 1)  # One per instance
+        
+        glBindVertexArray(0)
+        print("Instanced rendering setup complete")
     
     def _render_quads(self, quad_vertices, quad_uvs, quad_data, visible_count, viewport_width, viewport_height):
         """Render the generated quads"""
@@ -646,6 +781,32 @@ class PointRenderer:
         glDisable(GL_BLEND)  # Clean up blending state
         glDepthMask(GL_TRUE)  # Restore depth writing
     
+    def _render_instanced(self, num_instances, viewport_width, viewport_height):
+        """Render using instanced rendering"""
+        # Enable alpha blending
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        # Enable depth testing but disable depth writing
+        glEnable(GL_DEPTH_TEST)
+        glDepthFunc(GL_LESS)
+        glDepthMask(GL_FALSE)
+        
+        # Use instanced shader program
+        glUseProgram(self.instanced_shader_program)
+        
+        # Set viewport uniform
+        glUniform2f(self.instanced_viewport_uniform, viewport_width, viewport_height)
+        
+        # Bind VAO and render
+        glBindVertexArray(self.instanced_vao)
+        glDrawElementsInstanced(GL_TRIANGLES, 6, GL_UNSIGNED_INT, None, num_instances)
+        glBindVertexArray(0)
+        
+        glUseProgram(0)
+        glDisable(GL_BLEND)
+        glDepthMask(GL_TRUE)
+    
     def _render_quads_as_points(self, quad_params, colors_sorted, opacities_sorted, visibility_mask):
         """Render quad centers as points without index generation"""
         # Extract visible Gaussians only
@@ -705,7 +866,13 @@ class PointRenderer:
             glDeleteBuffers(1, [self.quad_radii_vbo])
         if self.instance_vbo:
             glDeleteBuffers(1, [self.instance_vbo])
+        if self.base_quad_vbo:
+            glDeleteBuffers(1, [self.base_quad_vbo])
+        if self.instanced_vao:
+            glDeleteVertexArrays(1, [self.instanced_vao])
         if self.shader_program:
             glDeleteProgram(self.shader_program)
         if self.gaussian_shader_program:
             glDeleteProgram(self.gaussian_shader_program)
+        if self.instanced_shader_program:
+            glDeleteProgram(self.instanced_shader_program)
