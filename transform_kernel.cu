@@ -216,10 +216,6 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float cov2d_01 = j00*j11*cov_view_01 + j02*j12*cov_view_12 + j00*j12*cov_view_12 + j02*j11*cov_view_01;
     float cov2d_11 = j11*j11*cov_view_11 + j12*j12*cov_view_22 + 2.0f*j11*j12*cov_view_12;
     
-    // DEBUG: Print raw projection results before regularization
-    if (idx < 3) {
-        printf("Before regularization: [[%e, %e], [%e, %e]]\n", cov2d_00, cov2d_01, cov2d_01, cov2d_11);
-    }
     
     // Add a much smaller regularization term to ensure positive definiteness
     // The original 1e-4f was too large and dominating the actual values
@@ -260,18 +256,6 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float radius_x = 3.0f * sqrtf(fmaxf(lambda1, 1e-6f));
     float radius_y = 3.0f * sqrtf(fmaxf(lambda2, 1e-6f));
     
-    // DEBUG: Print first few gaussians' computation
-    if (idx < 3) {
-        printf("\n=== DEBUG CUDA: Gaussian %d ===\n", idx);
-        printf("Input scales: [%f, %f, %f]\n", sx, sy, sz);
-        printf("Input rotation (quat): [%f, %f, %f, %f]\n", qw, qx, qy, qz);
-        printf("3D covariance diagonal: [%f, %f, %f]\n", cov3d_00, cov3d_11, cov3d_22);
-        printf("2D Covariance: [[%f, %f], [%f, %f]]\n", cov2d_00, cov2d_01, cov2d_01, cov2d_11);
-        printf("Eigenvalues: lambda1=%f, lambda2=%f\n", lambda1, lambda2);
-        printf("Radii in NDC: rx=%f, ry=%f\n", radius_x, radius_y);
-        printf("Distance: %f\n", -vz);
-        printf("trace=%.12f, det=%.12f\n", (float)trace, (float)det);
-    }
     
     // Cull if quad would be too small in NDC (less than 1e-6 - very permissive)
     if (radius_x < 1e-6f || radius_y < 1e-6f) {
@@ -306,14 +290,6 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float radius_x_ndc = radius_x;
     float radius_y_ndc = radius_y;
     
-    // DEBUG: Scale up quads to make them visible, but preserve perspective scaling
-    // Use distance-based scaling so closer objects are larger
-    float distance = -vz;  // Distance from camera (vz is negative in front)
-    //float scale_factor = 10000.0f / distance;  // Adjust this factor to make them visible
-    //float scale_factor= 1.F / distance;
-    //float scale_factor= ;
-    //radius_x_ndc *= scale_factor;
-    //radius_y_ndc *= scale_factor;
     
     // No artificial capping needed - let the natural 3σ bounds determine the size
     // The radii are already computed from the eigenvalues with 3σ scaling
@@ -355,9 +331,9 @@ void compact_visible_quads(const float* quad_vertices_in,       // Input quad ve
         int input_vertex_idx = idx * 4 + v;
         int output_vertex_idx = output_idx * 4 + v;
         
-        // Copy vertex data (6 floats per vertex: x,y,z,r,g,b)
-        for (int f = 0; f < 6; f++) {
-            quad_vertices_out[output_vertex_idx * 6 + f] = quad_vertices_in[input_vertex_idx * 6 + f];
+        // Copy vertex data (8 floats per vertex: x,y,z,r,g,b,center_x,center_y)
+        for (int f = 0; f < 8; f++) {
+            quad_vertices_out[output_vertex_idx * 8 + f] = quad_vertices_in[input_vertex_idx * 8 + f];
         }
         
         // Copy UV data (2 floats per vertex: u,v)
@@ -379,7 +355,7 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
                            const int* visibility_mask,         // Visibility mask
                            const float* colors,                // Colors (3 components each)
                            const float* opacities,             // Opacity values
-                           float* quad_vertices,               // Output: Quad vertices (6 floats per vertex: x,y,z,r,g,b)
+                           float* quad_vertices,               // Output: Quad vertices (8 floats per vertex: x,y,z,r,g,b,center_x,center_y)
                            float* quad_uvs,                    // Output: UV coordinates (2 floats per vertex)
                            float* quad_data,                   // Output: Per-quad data (opacity + 2D covariance inverse)
                            int* visible_count,                 // Output: Number of visible quads
@@ -408,11 +384,6 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     // Don't use atomic counter as it breaks sorting
     int quad_idx = idx;
     
-    // DEBUG: Print first quad generation
-    // if (idx == 0) {
-    //     printf("DEBUG QUAD GEN: idx=%d, center=(%f, %f), radius=(%f, %f), quad_idx=%d\n", 
-    //            idx, center_x, center_y, radius_x, radius_y, quad_idx);
-    // }
     
     // Load 2D covariance matrix
     int cov_offset = idx * 3;
@@ -423,15 +394,9 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     // Compute inverse of 2D covariance matrix for fragment shader
     float det = cov_00 * cov_11 - cov_01 * cov_01;
     
-    // DEBUG: Print first quad's covariance details
-    // if (idx == 0) {
-    //     printf("DEBUG QUAD GEN: cov=[[%f, %f], [%f, %f]], det=%f\n", 
-    //            cov_00, cov_01, cov_01, cov_11, det);
-    // }
     
     // Skip if covariance matrix is degenerate (made more permissive)
     if (det <= 1e-12f || cov_00 <= 1e-12f || cov_11 <= 1e-12f) {
-        // if (idx == 0) printf("DEBUG QUAD GEN: Skipping due to degenerate covariance\n");
         return;
     }
     
@@ -440,11 +405,6 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     float inv_cov_01 = -cov_01 * inv_det;
     float inv_cov_11 = cov_00 * inv_det;
     
-    // DEBUG: Print inverse covariance for first quad
-    // if (idx == 0) {
-    //     printf("DEBUG QUAD GEN: inv_cov=[[%f, %f], [%f, %f]]\n", 
-    //            inv_cov_00, inv_cov_01, inv_cov_01, inv_cov_11);
-    // }
     
     // Load color and opacity
     int color_offset = idx * 3;
@@ -482,7 +442,7 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     
     for (int i = 0; i < 4; i++) {
         int vertex_idx = quad_idx * 4 + i;
-        int vertex_offset = vertex_idx * 6;  // 6 floats per vertex (x,y,z,r,g,b)
+        int vertex_offset = vertex_idx * 8;  // 8 floats per vertex (x,y,z,r,g,b,center_x,center_y)
         int uv_offset = vertex_idx * 2;      // 2 floats per vertex (u,v)
         
         // Rotate and scale offset by covariance eigenvectors
@@ -501,6 +461,10 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
         quad_vertices[vertex_offset + 3] = r;
         quad_vertices[vertex_offset + 4] = g;
         quad_vertices[vertex_offset + 5] = b;
+        
+        // Store Gaussian center position in NDC space (new!)
+        quad_vertices[vertex_offset + 6] = center_x;
+        quad_vertices[vertex_offset + 7] = center_y;
         
         // Store UV coordinates
         quad_uvs[uv_offset + 0] = uvs[i * 2 + 0];

@@ -51,11 +51,13 @@ class PointRenderer:
         layout (location = 2) in vec2 aUV;       // UV coordinates
         layout (location = 3) in vec4 aQuadData; // Per-quad data (opacity, inv_cov_00, inv_cov_01, inv_cov_11)
         layout (location = 4) in vec2 aQuadRadii; // Per-quad radii (radius_x, radius_y)
+        layout (location = 5) in vec2 aGaussianCenter; // Gaussian center in NDC space
         
         out vec3 fragColor;
         out vec2 fragUV;
         out vec4 quadData;
         out vec2 quadRadii;
+        out vec2 gaussianCenter;
         
         void main()
         {
@@ -64,6 +66,7 @@ class PointRenderer:
             fragUV = aUV;
             quadData = aQuadData;
             quadRadii = aQuadRadii;
+            gaussianCenter = aGaussianCenter;
         }
         """
         
@@ -73,8 +76,11 @@ class PointRenderer:
         in vec2 fragUV;
         in vec4 quadData;  // opacity, inv_cov_00, inv_cov_01, inv_cov_11
         in vec2 quadRadii; // radius_x, radius_y (NDC extents)
+        in vec2 gaussianCenter; // Gaussian center in NDC space
         
         out vec4 FragColor;
+        
+        uniform vec2 viewport;  // Viewport dimensions (width, height)
         
         void main()
         {
@@ -83,43 +89,20 @@ class PointRenderer:
             float inv_cov_01 = quadData.z;
             float inv_cov_11 = quadData.w;
             
-            // DEBUG: Visualize radii data to see if it's being passed correctly
-            if (fragUV.x < 0.33) {
-                // Left third: Show radii as colors (scaled for visibility)
-                float radius_vis_x = quadRadii.x * 100.0; // Scale up for visibility
-                float radius_vis_y = quadRadii.y * 100.0;
-                FragColor = vec4(radius_vis_x, radius_vis_y, 0.0, 1.0);
-                return;
-            } else if (fragUV.x < 0.66) {
-                // Middle third: Show old behavior (fixed UV mapping)
-                vec2 d_old = (fragUV - 0.5) * 6.0;
-                float fixed_scale = 0.001;
-                float exponent_old = -0.5 * (d_old.x * d_old.x * inv_cov_00 * fixed_scale + 
-                                            2.0 * d_old.x * d_old.y * inv_cov_01 * fixed_scale + 
-                                            d_old.y * d_old.y * inv_cov_11 * fixed_scale);
-                exponent_old = max(exponent_old, -10.0);
-                float alpha_old = opacity * exp(exponent_old);
-                alpha_old = clamp(alpha_old, 0.0, 1.0);
-                FragColor = vec4(fragColor, alpha_old);
-                return;
-            } else {
-                // Right third: New mathematically correct approach
-                vec2 d = (fragUV - 0.5) * 2.0 * quadRadii;
-                
-                float scaled_inv_cov_00 = inv_cov_00;
-                float scaled_inv_cov_01 = inv_cov_01;
-                float scaled_inv_cov_11 = inv_cov_11;
-                
-                float exponent = -0.5 * (d.x * d.x * scaled_inv_cov_00 + 
-                                        2.0 * d.x * d.y * scaled_inv_cov_01 + 
-                                        d.y * d.y * scaled_inv_cov_11);
-                
-                exponent = max(exponent, -10.0);
-                float alpha = opacity * exp(exponent);
-                alpha = clamp(alpha, 0.0, 1.0);
-                FragColor = vec4(fragColor, alpha);
-                return;
-            }
+            // Convert gl_FragCoord from pixel coordinates to NDC
+            vec2 fragNDC = (gl_FragCoord.xy / viewport) * 2.0 - 1.0;
+            
+            // Calculate distance from fragment to Gaussian center in NDC space
+            vec2 d_ndc = fragNDC - gaussianCenter;
+            
+            float exponent_ndc = -0.5 * (d_ndc.x * d_ndc.x * inv_cov_00 + 
+                                        2.0 * d_ndc.x * d_ndc.y * inv_cov_01 + 
+                                        d_ndc.y * d_ndc.y * inv_cov_11);
+            
+            exponent_ndc = max(exponent_ndc, -10.0);
+            float alpha_ndc = opacity * exp(exponent_ndc);
+            alpha_ndc = clamp(alpha_ndc, 0.0, 1.0);
+            FragColor = vec4(fragColor, alpha_ndc);
         }
         """
         
@@ -141,7 +124,6 @@ class PointRenderer:
         self.rotations = None           # Rotation quaternions (CPU)
         self.opacity = None             # Opacity values (CPU)
         self.use_cuda = False  # Disable CUDA for now
-        self._debug_printed = False  # Debug flag
         
         # CUDA kernels for transformations
         self.transform_kernel = None
@@ -220,6 +202,9 @@ class PointRenderer:
         # Clean up shaders
         glDeleteShader(vertex_shader)
         glDeleteShader(fragment_shader)
+        
+        # Get uniform location for viewport
+        self.viewport_uniform = glGetUniformLocation(self.gaussian_shader_program, "viewport")
     
     def _load_transform_kernel(self):
         """Load the custom CUDA transform kernels"""
@@ -244,9 +229,7 @@ class PointRenderer:
         # Load PLY file using Open3D tensor API
         pcd_t = o3d.t.io.read_point_cloud(self.ply_path)
         
-        # Debug: Print all available fields in the PLY file
-        print("=== PLY FILE STRUCTURE DEBUG ===")
-        print("Available point fields:")
+        # Get available field names
         sh_fields = []
         
         # Get available field names by checking what's accessible
@@ -259,40 +242,19 @@ class PointRenderer:
                 if hasattr(pcd_t.point, field_name):
                     field_data = getattr(pcd_t.point, field_name)
                     available_fields.append(field_name)
-                    print(f"  {field_name}: shape={field_data.shape}, dtype={field_data.dtype}")
                     # Check for spherical harmonics fields
                     if field_name.startswith('f_dc_') or field_name.startswith('f_rest_'):
                         sh_fields.append(field_name)
                 elif field_name in pcd_t.point:
                     field_data = pcd_t.point[field_name]
                     available_fields.append(field_name)
-                    print(f"  {field_name}: shape={field_data.shape}, dtype={field_data.dtype}")
                     # Check for spherical harmonics fields
                     if field_name.startswith('f_dc_') or field_name.startswith('f_rest_'):
                         sh_fields.append(field_name)
             except:
                 continue
         
-        # Try to get additional field names that might exist
-        try:
-            # Some versions might have a different way to access field names
-            if hasattr(pcd_t.point, 'get_dtype'):
-                print("Point cloud dtype info:", pcd_t.point.get_dtype())
-        except:
-            pass
         
-        if sh_fields:
-            print(f"Found {len(sh_fields)} spherical harmonics fields: {sh_fields}")
-        
-        # Check for common Gaussian splatting fields
-        common_fields = ['scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3', 'opacity']
-        missing_fields = [f for f in common_fields if f not in available_fields]
-        if missing_fields:
-            print(f"Missing common Gaussian splatting fields: {missing_fields}")
-        else:
-            print("All common Gaussian splatting fields are present!")
-        
-        print("=== END PLY STRUCTURE DEBUG ===")
         
         # Extract positions (x, y, z)
         positions = None
@@ -337,10 +299,8 @@ class PointRenderer:
             scales = np.squeeze(scales)
             if scales.ndim == 3 and scales.shape[1] == 1:
                 scales = scales.squeeze(1)
-            print(f"Scale data shape (log space): {scales.shape}, range: [{scales.min():.4f}, {scales.max():.4f}]")
             # Convert from log space to linear space
             scales = np.exp(scales)
-            print(f"Scale data (linear space) range: [{scales.min():.6f}, {scales.max():.6f}]")
         else:
             print("No scale vectors found, using default scales")
             scales = np.ones((len(positions), 3)) * 0.01  # Small default scale
@@ -358,11 +318,9 @@ class PointRenderer:
             rotations = np.squeeze(rotations)
             if rotations.ndim == 3 and rotations.shape[1] == 1:
                 rotations = rotations.squeeze(1)
-            print(f"Rotation data shape (raw): {rotations.shape}, range: [{rotations.min():.4f}, {rotations.max():.4f}]")
             # Normalize quaternions to ensure they are unit quaternions
             norms = np.linalg.norm(rotations, axis=1, keepdims=True)
             rotations = rotations / norms
-            print(f"Rotation data (normalized) range: [{rotations.min():.6f}, {rotations.max():.6f}]")
         else:
             print("No rotation quaternions found, using identity rotations")
             rotations = np.zeros((len(positions), 4))
@@ -376,10 +334,8 @@ class PointRenderer:
             opacity = np.squeeze(opacity)
             if opacity.ndim == 2 and opacity.shape[1] == 1:
                 opacity = opacity.squeeze(1)
-            print(f"Opacity data shape (logit space): {opacity.shape}, range: [{opacity.min():.4f}, {opacity.max():.4f}]")
             # Convert from logit space to probability using sigmoid
             opacity = 1.0 / (1.0 + np.exp(-opacity))
-            print(f"Opacity data (probability space) range: [{opacity.min():.6f}, {opacity.max():.6f}]")
         else:
             print("No opacity values found, using full opacity")
             opacity = np.ones(len(positions))
@@ -393,14 +349,6 @@ class PointRenderer:
         self.rotations = rotations.astype(np.float32)
         self.opacities = opacity.astype(np.float32)
         
-        # Debug summary of loaded Gaussian splatting data
-        print("=== GAUSSIAN SPLATTING DATA SUMMARY ===")
-        print(f"Positions: {self.original_positions.shape}")
-        print(f"Colors: {self.colors.shape}")
-        print(f"Scales: {self.scales.shape}")
-        print(f"Rotations: {self.rotations.shape}")
-        print(f"Opacities: {self.opacities.shape}")
-        print("=== END DATA SUMMARY ===")
         
         # Create initial interleaved vertex data (will be updated with transformed data)
         vertex_data = np.zeros((len(positions), 6), dtype=np.float32)
@@ -488,7 +436,7 @@ class PointRenderer:
         
         # Generate quad vertices for visible Gaussians
         max_quads = self.num_points  # Maximum possible number of quads
-        gpu_quad_vertices = cp.zeros((max_quads * 4, 6), dtype=cp.float32)  # 4 vertices per quad, 6 floats per vertex
+        gpu_quad_vertices = cp.zeros((max_quads * 4, 8), dtype=cp.float32)  # 4 vertices per quad, 8 floats per vertex (x,y,z,r,g,b,center_x,center_y)
         gpu_quad_uvs = cp.zeros((max_quads * 4, 2), dtype=cp.float32)       # 4 vertices per quad, 2 UV per vertex
         gpu_quad_data = cp.zeros((max_quads, 6), dtype=cp.float32)          # Per-quad data (opacity + inverse covariance + radii)
         gpu_visible_count = cp.zeros(1, dtype=cp.int32)                    # Counter for visible quads
@@ -514,7 +462,7 @@ class PointRenderer:
         
         if visible_count > 0:
             # Step 2: Allocate output buffers
-            gpu_quad_vertices_compacted = cp.zeros((visible_count * 4, 6), dtype=cp.float32)
+            gpu_quad_vertices_compacted = cp.zeros((visible_count * 4, 8), dtype=cp.float32)
             gpu_quad_uvs_compacted = cp.zeros((visible_count * 4, 2), dtype=cp.float32)
             gpu_quad_data_compacted = cp.zeros((visible_count, 6), dtype=cp.float32)
             
@@ -541,12 +489,6 @@ class PointRenderer:
         quad_params = cp.asnumpy(gpu_quad_params)
         visibility_mask = cp.asnumpy(gpu_visibility_mask)
         
-        # Debug output for first frame (simplified)
-        if not self._debug_printed:
-            print("=== QUAD RENDERING ACTIVE ===")
-            print(f"Visible Gaussians: {visibility_mask.sum()} / {len(visibility_mask)}")
-            print(f"Generated quads: {visible_count}")
-            self._debug_printed = True
         
         # Set up quad VAO and VBOs if not already done
         if self.quad_vao is None:
@@ -554,7 +496,7 @@ class PointRenderer:
         
         # Render quads if we have any visible ones
         if visible_count > 0:
-            self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count)
+            self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count, viewport_width, viewport_height)
         
         # Render quads as points (new method that doesn't require index generation)
         # render_quads_as_points = False
@@ -586,19 +528,21 @@ class PointRenderer:
         """Set up OpenGL objects for quad rendering"""
         # Create quad VAO and VBOs
         self.quad_vao = glGenVertexArrays(1)
-        self.quad_vbo = glGenBuffers(1)           # Vertex positions and colors
+        self.quad_vbo = glGenBuffers(1)           # Vertex positions, colors, and center
         self.quad_uv_vbo = glGenBuffers(1)        # UV coordinates
         self.quad_data_vbo = glGenBuffers(1)      # Per-quad data part 1 (opacity, inverse covariance)
         self.quad_radii_vbo = glGenBuffers(1)     # Per-quad data part 2 (radii)
         
         glBindVertexArray(self.quad_vao)
         
-        # Set up vertex position and color buffer (6 floats per vertex: x,y,z,r,g,b)
+        # Set up vertex buffer (8 floats per vertex: x,y,z,r,g,b,center_x,center_y)
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_vbo)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, None)           # Position
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * 4, None)           # Position
         glEnableVertexAttribArray(0)
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))  # Color
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * 4, ctypes.c_void_p(3 * 4))  # Color
         glEnableVertexAttribArray(1)
+        glVertexAttribPointer(5, 2, GL_FLOAT, GL_FALSE, 8 * 4, ctypes.c_void_p(6 * 4))  # Gaussian center
+        glEnableVertexAttribArray(5)
         
         # Set up UV coordinates buffer (2 floats per vertex: u,v)
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_uv_vbo)
@@ -619,7 +563,7 @@ class PointRenderer:
         glBindVertexArray(0)
         print("Quad rendering setup complete")
     
-    def _render_quads(self, quad_vertices, quad_uvs, quad_data, visible_count):
+    def _render_quads(self, quad_vertices, quad_uvs, quad_data, visible_count, viewport_width, viewport_height):
         """Render the generated quads"""
         # Update quad vertex buffer
         glBindBuffer(GL_ARRAY_BUFFER, self.quad_vbo)
@@ -654,6 +598,10 @@ class PointRenderer:
         
         # Render quads using Gaussian shader
         glUseProgram(self.gaussian_shader_program)
+        
+        # Set viewport uniform
+        glUniform2f(self.viewport_uniform, viewport_width, viewport_height)
+        
         glBindVertexArray(self.quad_vao)
         
         # Draw as triangles (2 triangles per quad = 6 vertices per quad)

@@ -74,16 +74,68 @@
 - [x] **Multi-buffer management**: Separate optimized buffers for vertices, UVs, and per-quad data
 - [x] **Quality validation**: Achieved working Gaussian splatting with proper mathematical evaluation
 
-### Phase 6: Mathematical Precision & Unit Consistency
-- [ ] **Unit mismatch analysis**: Resolve coordinate space inconsistency between covariance and UV mapping
-- [ ] **Dynamic UV mapping**: Pass actual quad extents to shader for mathematically correct mapping
-- [ ] **OpenGL attribute restructuring**: Add vertex attributes for per-quad radius information  
-- [ ] **Eliminate scaling hacks**: Remove fixed "magical" scaling factors with proper unit handling
-- [ ] **Distance-invariant rendering**: Ensure Gaussian appearance doesn't change with camera distance
-- [ ] **Shader optimization**: Compute UV scaling directly from NDC quad extents
-- [ ] **Validation**: Verify mathematical correctness of d^T * Σ^(-1) * d computation
+### Phase 6: Fragment Shader Refactoring - Screen Space Evaluation
 
-**Technical Challenge**: Currently using fixed scaling factor (0.001) in fragment shader due to unit mismatch between NDC-space covariance matrices and fixed [-3,3] UV mapping. Need to pass actual quad radii to shader for per-fragment correct coordinate transformation.
+#### Current State
+The fragment shader currently relies on **interpolated per-vertex data**:
+- UV coordinates are generated per-vertex (0,0 to 1,1) and interpolated across each quad
+- The fragment shader uses these interpolated UVs to determine position within the quad: `vec2 d = (fragUV - 0.5) * 2.0 * quadRadii`
+- All per-Gaussian data (color, opacity, inverse covariance) is duplicated for each vertex
+- This creates unnecessary data duplication and relies on barycentric interpolation
+
+#### Target State  
+Refactor to use **screen-space evaluation directly**:
+- Fragment shader receives the same data for all fragments in a quad (no interpolation)
+- Use `gl_FragCoord.xy` to get the fragment's actual screen position
+- Pass only the Gaussian's 2D screen-space center position
+- Calculate offset directly: `vec2 d = gl_FragCoord.xy - gaussianCenter.xy`
+- More elegant, direct computation without UV mapping indirection
+
+#### Implementation Steps (Small Incremental Changes)
+
+##### Step 1: Add Screen-Space Center to Fragment Shader
+- [ ] **Pass Gaussian center position**: Add gaussian center as a new vertex attribute (duplicated per vertex for now)
+- [ ] **Update CUDA kernel**: Modify `generate_quad_vertices` to include screen-space center position
+- [ ] **Update fragment shader**: Add new uniform/attribute for center position
+- [ ] **Test dual rendering**: Show both UV-based and gl_FragCoord-based calculations side-by-side
+- [ ] **Validation**: Confirm both methods produce identical results
+
+##### Step 2: Convert Fragment Shader to gl_FragCoord
+- [ ] **Fragment shader switch**: Replace UV-based calculation with `gl_FragCoord.xy - gaussianCenter.xy`
+- [ ] **Handle coordinate systems**: Convert gl_FragCoord from pixel coordinates to same space as gaussian center
+- [ ] **Remove UV dependencies**: Comment out UV-based code but keep UV data flow for now
+- [ ] **Visual validation**: Ensure Gaussians still render correctly
+- [ ] **Debug output**: Temporarily visualize distance calculations to verify correctness
+
+##### Step 3: Prepare for Instanced Rendering
+- [ ] **Create instance data structure**: Define struct for per-Gaussian data (center, color, opacity, covariance)
+- [ ] **Generate instance buffer data**: Modify CUDA to output instance data array alongside quad vertices
+- [ ] **Add instance VBO**: Create new VBO for instance data (not yet used for rendering)
+- [ ] **Test data generation**: Verify instance data is correctly populated
+- [ ] **Keep current rendering**: Don't switch to instanced rendering yet
+
+##### Step 4: Implement Instanced Rendering
+- [ ] **Create base quad geometry**: Single quad with 4 vertices centered at origin
+- [ ] **Set up instanced attributes**: Configure VAO with per-instance data
+- [ ] **Update vertex shader**: Use instance data to position/scale quads
+- [ ] **Switch to glDrawElementsInstanced**: Replace current draw call
+- [ ] **A/B testing**: Add toggle to switch between old and new rendering methods
+
+##### Step 5: Optimize and Clean Up
+- [ ] **Remove UV generation**: Delete UV coordinate generation from CUDA kernel
+- [ ] **Remove per-vertex duplication**: Clean up redundant data in vertex buffers
+- [ ] **Optimize instance data layout**: Pack data efficiently for GPU cache
+- [ ] **Performance comparison**: Measure FPS and memory usage before/after
+- [ ] **Final validation**: Ensure visual quality matches original implementation
+
+##### Step 6: Address Edge Cases
+- [ ] **Viewport handling**: Ensure gl_FragCoord works correctly with viewport changes
+- [ ] **Resolution independence**: Test with different window sizes
+- [ ] **Coordinate precision**: Verify no precision issues at screen edges
+- [ ] **Depth handling**: Confirm depth testing still works correctly
+- [ ] **Clean up old code**: Remove all UV-related code paths
+
+**Technical Note**: This change will also naturally resolve the unit consistency issues from the original Phase 6, as we'll be working directly in screen space throughout.
 
 ### Phase 7: Advanced Features (Future)
 - [ ] **Higher-order SH**: Implement view-dependent color evaluation
