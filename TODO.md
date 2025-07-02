@@ -137,10 +137,16 @@ Refactor to use **screen-space evaluation directly**:
 
 **Technical Note**: This change will also naturally resolve the unit consistency issues from the original Phase 6, as we'll be working directly in screen space throughout.
 
-### Phase 7: Advanced Features (Future)
+### Phase 7: Performance Optimizations (Future)
+- [ ] **GPU-based visibility culling**: Implement efficient CUDA prefix sum for compacting visible quads
+- [ ] **Frustum culling**: Cull Gaussians outside view frustum  
+- [ ] **Screen-space culling**: Skip quads that are too small to see
+- [ ] **Z-culling**: Skip Gaussians behind the camera
+- [ ] **Hierarchical culling**: Use spatial data structures for faster culling
+
+### Phase 8: Advanced Features (Future)
 - [ ] **Higher-order SH**: Implement view-dependent color evaluation
 - [ ] **Level-of-detail**: Adaptive quality based on distance/size
-- [ ] **Frustum culling**: Cull Gaussians outside view frustum
 - [ ] **Temporal coherence**: Optimize for animated/moving cameras
 
 ## Technical Notes

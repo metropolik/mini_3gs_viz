@@ -120,18 +120,9 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float vz = view_space_positions[pos_offset + 2];
     float vw = view_space_positions[pos_offset + 3];
     
-    // Cull if behind camera (z > 0 in view space)
-    if (vz > 0.0f) {
-        visibility_mask[idx] = 0;
-        // Initialize quad params to zero for culled points
-        quad_params[quad_offset + 0] = 0.0f;
-        quad_params[quad_offset + 1] = 0.0f;
-        quad_params[quad_offset + 2] = 0.0f;
-        quad_params[quad_offset + 3] = 0.0f;
-        quad_params[quad_offset + 4] = 0.0f;
-        quad_params[quad_offset + 4] = 0.0f;
-        return;
-    }
+    // Don't cull for performance - render all quads
+    // Even if behind camera, still compute parameters
+    visibility_mask[idx] = 1;  // Mark all as visible
     
     // Load scale and rotation
     float sx = scales[scale_offset + 0];
@@ -235,16 +226,8 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     double discriminant = trace * trace - 4.0 * det;
     
     if (discriminant < 0.0) {
-        // Degenerate case, mark as invisible
-        visibility_mask[idx] = 0;
-        // Initialize quad params to zero
-        quad_params[quad_offset + 0] = 0.0f;
-        quad_params[quad_offset + 1] = 0.0f;
-        quad_params[quad_offset + 2] = 0.0f;
-        quad_params[quad_offset + 3] = 0.0f;
-        quad_params[quad_offset + 4] = 0.0f;
-        quad_params[quad_offset + 4] = 0.0f;
-        return;
+        // Degenerate case, but still render with minimal size
+        discriminant = 0.0;
     }
     
     double sqrt_disc = sqrt(discriminant);
@@ -257,33 +240,19 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float radius_y = 3.0f * sqrtf(fmaxf(lambda2, 1e-6f));
     
     
-    // Cull if quad would be too small in NDC (less than 1e-6 - very permissive)
-    if (radius_x < 1e-6f || radius_y < 1e-6f) {
-        visibility_mask[idx] = 0;
-        // Initialize quad params to zero
-        quad_params[quad_offset + 0] = 0.0f;
-        quad_params[quad_offset + 1] = 0.0f;
-        quad_params[quad_offset + 2] = 0.0f;
-        quad_params[quad_offset + 3] = 0.0f;
-        quad_params[quad_offset + 4] = 0.0f;
-        quad_params[quad_offset + 4] = 0.0f;
-        return;
-    }
+    // Don't cull small quads - render everything
+    // Ensure minimum size for degenerate cases
+    radius_x = fmaxf(radius_x, 1e-6f);
+    radius_y = fmaxf(radius_y, 1e-6f);
     
     // Project center to normalized device coordinates (NDC) using full projection
     float ndc_x, ndc_y, ndc_z;
     project_to_ndc(vx, vy, vz, vw, proj_matrix, ndc_x, ndc_y, ndc_z);
     
-    // Check for invalid values only
-    if (!isfinite(ndc_x) || !isfinite(ndc_y)) {
-        visibility_mask[idx] = 0;
-        quad_params[quad_offset + 0] = 0.0f;
-        quad_params[quad_offset + 1] = 0.0f;
-        quad_params[quad_offset + 2] = 0.0f;
-        quad_params[quad_offset + 3] = 0.0f;
-        quad_params[quad_offset + 4] = 0.0f;
-        return;
-    }
+    // Handle invalid values by clamping
+    if (!isfinite(ndc_x)) ndc_x = 0.0f;
+    if (!isfinite(ndc_y)) ndc_y = 0.0f;
+    if (!isfinite(ndc_z)) ndc_z = 0.0f;
     
     // The radii are already in the correct space due to projection matrix scaling in Jacobian
     // No additional conversion needed
@@ -301,8 +270,7 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     quad_params[quad_offset + 3] = radius_y_ndc;
     quad_params[quad_offset + 4] = ndc_z;  // Store NDC z for depth
     
-    // Mark as visible
-    visibility_mask[idx] = 1;
+    // All quads are visible (already set above)
 }
 
 // Compact visible quads using prefix sum - maintains sorted order
@@ -364,21 +332,13 @@ void generate_quad_vertices(const float* quad_params,           // Quad paramete
     
     if (idx >= num_points) return;
     
-    // Skip if not visible
-    if (visibility_mask[idx] == 0) return;
-    
-    // Load quad parameters and check validity first
+    // Load quad parameters - no visibility check for performance
     int param_offset = idx * 5;
     float center_x = quad_params[param_offset + 0];
     float center_y = quad_params[param_offset + 1];
     float radius_x = quad_params[param_offset + 2];
     float radius_y = quad_params[param_offset + 3];
     float ndc_z = quad_params[param_offset + 4];
-    
-    // Skip if quad parameters are invalid (zero radius means it was culled)
-    if (radius_x <= 0.0f || radius_y <= 0.0f) {
-        return;
-    }
     
     // Use the original sorted index to maintain depth order
     // Don't use atomic counter as it breaks sorting
@@ -504,4 +464,63 @@ void generate_quad_indices(unsigned int* indices,    // Output: Triangle indices
     indices[base_index + 3] = base_vertex + 1;
     indices[base_index + 4] = base_vertex + 3;
     indices[base_index + 5] = base_vertex + 2;
+}
+
+// Generate instance data for instanced rendering
+// Each instance represents one Gaussian with all its properties
+extern "C" __global__
+void generate_instance_data(const float* quad_params,     // Quad parameters (center_x, center_y, radius_x, radius_y, ndc_z)
+                           const float* cov2d_data,       // 2D covariance matrices (3 components each)
+                           const int* visibility_mask,    // Visibility mask
+                           const float* colors,           // Colors (3 components each)
+                           const float* opacities,        // Opacity values
+                           float* instance_data,          // Output: Instance data (10 floats per instance)
+                           int num_points) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (idx >= num_points) return;
+    
+    // Load quad parameters - no visibility check
+    int param_offset = idx * 5;
+    float center_x = quad_params[param_offset + 0];
+    float center_y = quad_params[param_offset + 1];
+    float radius_x = quad_params[param_offset + 2];
+    float radius_y = quad_params[param_offset + 3];
+    float ndc_z = quad_params[param_offset + 4];
+    
+    // Load 2D covariance matrix
+    int cov_offset = idx * 3;
+    float cov_00 = cov2d_data[cov_offset + 0];
+    float cov_01 = cov2d_data[cov_offset + 1];
+    float cov_11 = cov2d_data[cov_offset + 2];
+    
+    // Compute inverse of 2D covariance matrix
+    float det = cov_00 * cov_11 - cov_01 * cov_01;
+    if (det <= 1e-12f) det = 1e-12f;  // Ensure non-zero determinant
+    
+    float inv_det = 1.0f / det;
+    float inv_cov_00 = cov_11 * inv_det;
+    float inv_cov_01 = -cov_01 * inv_det;
+    float inv_cov_11 = cov_00 * inv_det;
+    
+    // Load color and opacity
+    int color_offset = idx * 3;
+    float r = colors[color_offset + 0];
+    float g = colors[color_offset + 1];
+    float b = colors[color_offset + 2];
+    float opacity = opacities[idx];
+    
+    // Pack instance data (10 floats per instance)
+    // Layout: center_x, center_y, ndc_z, r, g, b, opacity, inv_cov_00, inv_cov_01, inv_cov_11
+    int instance_offset = idx * 10;
+    instance_data[instance_offset + 0] = center_x;
+    instance_data[instance_offset + 1] = center_y;
+    instance_data[instance_offset + 2] = ndc_z;
+    instance_data[instance_offset + 3] = r;
+    instance_data[instance_offset + 4] = g;
+    instance_data[instance_offset + 5] = b;
+    instance_data[instance_offset + 6] = opacity;
+    instance_data[instance_offset + 7] = inv_cov_00;
+    instance_data[instance_offset + 8] = inv_cov_01;
+    instance_data[instance_offset + 9] = inv_cov_11;
 }

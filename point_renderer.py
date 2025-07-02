@@ -123,6 +123,7 @@ class PointRenderer:
         self.quad_vbo = None        # VBO for quad vertices
         self.quad_uv_vbo = None     # VBO for UV coordinates
         self.quad_data_vbo = None   # VBO for per-quad data
+        self.instance_vbo = None    # VBO for instance data (for future instanced rendering)
         self.num_points = 0
         
         # CPU transformation objects
@@ -225,7 +226,8 @@ class PointRenderer:
             self.quad_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_vertices')
             self.index_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_indices')
             self.compact_visible_kernel = cp.RawKernel(kernel_source, 'compact_visible_quads')
-            print("Custom transform, covariance, quad generation, index generation, and compaction kernels loaded successfully")
+            self.instance_generation_kernel = cp.RawKernel(kernel_source, 'generate_instance_data')
+            print("Custom transform, covariance, quad generation, index generation, compaction, and instance kernels loaded successfully")
         except Exception as e:
             raise RuntimeError(f"Failed to load transform kernels: {e}")
     
@@ -458,37 +460,26 @@ class PointRenderer:
         # Get the actual number of visible quads
         visible_count = int(cp.asnumpy(gpu_visible_count)[0])
         
+        # Generate instance data for future instanced rendering (Step 3)
+        gpu_instance_data = cp.zeros((self.num_points, 10), dtype=cp.float32)  # 10 floats per instance
+        self.instance_generation_kernel((grid_size,), (block_size,),
+                                      (gpu_quad_params, gpu_cov2d, gpu_visibility_mask,
+                                       gpu_colors_sorted, gpu_opacities_sorted,
+                                       gpu_instance_data, self.num_points))
+        
         # Second transformation: Apply Projection matrix with perspective division (for point centers - for debugging)
         gpu_transformed_positions = cp.zeros((self.num_points, 3), dtype=cp.float32)
         self.transform_perspective_kernel((grid_size,), (block_size,), 
                                         (gpu_p, gpu_view_space_sorted, gpu_transformed_positions, self.num_points))
         
-        # Use CUDA prefix sum for efficient visible quad compaction
-        # Step 1: Compute prefix sum of visibility mask
-        gpu_prefix_sum = cp.cumsum(gpu_visibility_mask) - gpu_visibility_mask
-        visible_count = int(cp.sum(gpu_visibility_mask))
+        # Skip visibility culling - render all quads for performance
+        # Just use the data as-is without compaction
+        visible_count = self.num_points  # Treat all as visible
         
-        if visible_count > 0:
-            # Step 2: Allocate output buffers
-            gpu_quad_vertices_compacted = cp.zeros((visible_count * 4, 8), dtype=cp.float32)
-            gpu_quad_uvs_compacted = cp.zeros((visible_count * 4, 2), dtype=cp.float32)
-            gpu_quad_data_compacted = cp.zeros((visible_count, 6), dtype=cp.float32)
-            
-            # Step 3: Launch compaction kernel
-            self.compact_visible_kernel((grid_size,), (block_size,),
-                                      (gpu_quad_vertices, gpu_quad_uvs, gpu_quad_data,
-                                       gpu_visibility_mask, gpu_prefix_sum,
-                                       gpu_quad_vertices_compacted, gpu_quad_uvs_compacted, gpu_quad_data_compacted,
-                                       self.num_points))
-            
-            # Step 4: Transfer compacted data to CPU
-            quad_vertices = cp.asnumpy(gpu_quad_vertices_compacted)
-            quad_uvs = cp.asnumpy(gpu_quad_uvs_compacted)
-            quad_data = cp.asnumpy(gpu_quad_data_compacted)
-        else:
-            quad_vertices = np.array([], dtype=np.float32)
-            quad_uvs = np.array([], dtype=np.float32)
-            quad_data = np.array([], dtype=np.float32)
+        # Transfer data to CPU without compaction
+        quad_vertices = cp.asnumpy(gpu_quad_vertices).reshape(-1, 8)  # Reshape to proper format
+        quad_uvs = cp.asnumpy(gpu_quad_uvs).reshape(-1, 2)
+        quad_data = cp.asnumpy(gpu_quad_data)
         
         # Transfer debug data
         transformed_positions = cp.asnumpy(gpu_transformed_positions)
@@ -501,6 +492,15 @@ class PointRenderer:
         # Set up quad VAO and VBOs if not already done
         if self.quad_vao is None:
             self._setup_quad_rendering()
+        
+        # Create instance VBO if not already done (Step 3)
+        if self.instance_vbo is None:
+            self.instance_vbo = glGenBuffers(1)
+        
+        # Update instance buffer with all instance data (no visibility check for performance)
+        instance_data = cp.asnumpy(gpu_instance_data).flatten()
+        glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
+        glBufferData(GL_ARRAY_BUFFER, instance_data.nbytes, instance_data, GL_DYNAMIC_DRAW)
         
         # Render quads if we have any visible ones
         if visible_count > 0:
@@ -703,6 +703,8 @@ class PointRenderer:
             glDeleteBuffers(1, [self.quad_data_vbo])
         if self.quad_radii_vbo:
             glDeleteBuffers(1, [self.quad_radii_vbo])
+        if self.instance_vbo:
+            glDeleteBuffers(1, [self.instance_vbo])
         if self.shader_program:
             glDeleteProgram(self.shader_program)
         if self.gaussian_shader_program:
