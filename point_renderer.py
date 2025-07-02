@@ -43,33 +43,7 @@ class PointRenderer:
         }
         """
         
-        # Gaussian quad shaders
-        self.gaussian_vertex_shader_source = """
-        #version 330 core
-        layout (location = 0) in vec3 aPos;      // Vertex position in NDC
-        layout (location = 1) in vec3 aColor;    // Vertex color
-        layout (location = 2) in vec2 aUV;       // UV coordinates
-        layout (location = 3) in vec4 aQuadData; // Per-quad data (opacity, inv_cov_00, inv_cov_01, inv_cov_11)
-        layout (location = 4) in vec2 aQuadRadii; // Per-quad radii (radius_x, radius_y)
-        layout (location = 5) in vec2 aGaussianCenter; // Gaussian center in NDC space
-        
-        out vec3 fragColor;
-        out vec2 fragUV;
-        out vec4 quadData;
-        out vec2 quadRadii;
-        out vec2 gaussianCenter;
-        
-        void main()
-        {
-            gl_Position = vec4(aPos, 1.0);
-            fragColor = aColor;
-            fragUV = aUV;
-            quadData = aQuadData;
-            quadRadii = aQuadRadii;
-            gaussianCenter = aGaussianCenter;
-        }
-        """
-        
+        # Fragment shader for Gaussian evaluation
         self.gaussian_fragment_shader_source = """
         #version 330 core
         in vec3 fragColor;
@@ -131,12 +105,52 @@ class PointRenderer:
         
         void main()
         {
-            // For now, create simple axis-aligned quads
-            // TODO: Use covariance for proper orientation
-            float quadSize = 0.05; // Fixed size for testing
+            // Extract inverse covariance matrix
+            float inv_cov_00 = aInstanceCovariance.y;
+            float inv_cov_01 = aInstanceCovariance.z;
+            float inv_cov_11 = aInstanceCovariance.w;
+            
+            // Compute covariance matrix from inverse (for sizing)
+            float det_inv = inv_cov_00 * inv_cov_11 - inv_cov_01 * inv_cov_01;
+            if (abs(det_inv) < 1e-6) det_inv = 1e-6; // Avoid division by zero
+            
+            float cov_00 = inv_cov_11 / det_inv;
+            float cov_01 = -inv_cov_01 / det_inv;
+            float cov_11 = inv_cov_00 / det_inv;
+            
+            // Compute eigenvalues for quad sizing
+            float trace = cov_00 + cov_11;
+            float det = cov_00 * cov_11 - cov_01 * cov_01;
+            float discriminant = trace * trace - 4.0 * det;
+            discriminant = max(discriminant, 0.0);
+            
+            float sqrt_disc = sqrt(discriminant);
+            float lambda1 = 0.5 * (trace + sqrt_disc);
+            float lambda2 = 0.5 * (trace - sqrt_disc);
+            
+            // Compute radii (3 sigma bounds)
+            float radius_x = 3.0 * sqrt(max(lambda1, 1e-6));
+            float radius_y = 3.0 * sqrt(max(lambda2, 1e-6));
+            
+            // Compute eigenvector for orientation
+            vec2 evec;
+            if (abs(cov_01) > 1e-6) {
+                evec.x = lambda1 - cov_11;
+                evec.y = cov_01;
+                evec = normalize(evec);
+            } else {
+                evec = vec2(1.0, 0.0);
+            }
+            
+            // Create rotation matrix from eigenvector
+            mat2 rotation = mat2(evec.x, evec.y, -evec.y, evec.x);
+            
+            // Scale and rotate the base quad vertex
+            vec2 scaledVertex = aQuadVertex * vec2(radius_x, radius_y);
+            vec2 rotatedVertex = rotation * scaledVertex;
             
             vec3 position;
-            position.xy = aInstanceCenter.xy + aQuadVertex * quadSize;
+            position.xy = aInstanceCenter.xy + rotatedVertex;
             position.z = aInstanceCenter.z;
             
             gl_Position = vec4(position, 1.0);
@@ -149,15 +163,10 @@ class PointRenderer:
         
         # OpenGL objects
         self.shader_program = None
-        self.gaussian_shader_program = None  # Shader program for Gaussian quads
         self.instanced_shader_program = None  # Shader program for instanced rendering
         self.vao = None
         self.vbo = None
-        self.quad_vao = None        # VAO for quad rendering
-        self.quad_vbo = None        # VBO for quad vertices
-        self.quad_uv_vbo = None     # VBO for UV coordinates
-        self.quad_data_vbo = None   # VBO for per-quad data
-        self.instance_vbo = None    # VBO for instance data (for future instanced rendering)
+        self.instance_vbo = None    # VBO for instance data
         self.base_quad_vbo = None   # VBO for base quad geometry
         self.instanced_vao = None   # VAO for instanced rendering
         self.num_points = 0
@@ -183,7 +192,6 @@ class PointRenderer:
         # Initialize if PLY file is provided
         if ply_path and os.path.exists(ply_path):
             self._setup_shaders()
-            self._setup_gaussian_shaders()
             self._setup_instanced_shaders()
             self._load_ply()
             # Enable point size control
@@ -227,30 +235,6 @@ class PointRenderer:
         
         # No uniforms needed for pre-transformed vertices
     
-    def _setup_gaussian_shaders(self):
-        """Create and compile Gaussian quad shaders"""
-        print("Setting up Gaussian quad shaders...")
-        
-        # Compile shaders
-        vertex_shader = self._compile_shader(self.gaussian_vertex_shader_source, GL_VERTEX_SHADER)
-        fragment_shader = self._compile_shader(self.gaussian_fragment_shader_source, GL_FRAGMENT_SHADER)
-        
-        # Create shader program
-        self.gaussian_shader_program = glCreateProgram()
-        glAttachShader(self.gaussian_shader_program, vertex_shader)
-        glAttachShader(self.gaussian_shader_program, fragment_shader)
-        glLinkProgram(self.gaussian_shader_program)
-        
-        if not glGetProgramiv(self.gaussian_shader_program, GL_LINK_STATUS):
-            error = glGetProgramInfoLog(self.gaussian_shader_program).decode()
-            raise RuntimeError(f"Gaussian program linking failed: {error}")
-        
-        # Clean up shaders
-        glDeleteShader(vertex_shader)
-        glDeleteShader(fragment_shader)
-        
-        # Get uniform location for viewport
-        self.viewport_uniform = glGetUniformLocation(self.gaussian_shader_program, "viewport")
     
     def _setup_instanced_shaders(self):
         """Create and compile instanced rendering shaders"""
@@ -286,11 +270,8 @@ class PointRenderer:
             self.transform_kernel = cp.RawKernel(kernel_source, 'transform_points')
             self.transform_perspective_kernel = cp.RawKernel(kernel_source, 'transform_points_with_perspective')
             self.covariance_kernel = cp.RawKernel(kernel_source, 'compute_2d_covariance')
-            self.quad_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_vertices')
-            self.index_generation_kernel = cp.RawKernel(kernel_source, 'generate_quad_indices')
-            self.compact_visible_kernel = cp.RawKernel(kernel_source, 'compact_visible_quads')
             self.instance_generation_kernel = cp.RawKernel(kernel_source, 'generate_instance_data')
-            print("Custom transform, covariance, quad generation, index generation, compaction, and instance kernels loaded successfully")
+            print("Custom transform, covariance, and instance kernels loaded successfully")
         except Exception as e:
             raise RuntimeError(f"Failed to load transform kernels: {e}")
     
@@ -507,21 +488,8 @@ class PointRenderer:
                               gpu_mv, gpu_p, gpu_cov2d, gpu_quad_params, gpu_visibility_mask,
                               viewport_width, viewport_height, self.num_points))
         
-        # Generate quad vertices for visible Gaussians
-        max_quads = self.num_points  # Maximum possible number of quads
-        gpu_quad_vertices = cp.zeros((max_quads * 4, 8), dtype=cp.float32)  # 4 vertices per quad, 8 floats per vertex (x,y,z,r,g,b,center_x,center_y)
-        gpu_quad_uvs = cp.zeros((max_quads * 4, 2), dtype=cp.float32)       # 4 vertices per quad, 2 UV per vertex
-        gpu_quad_data = cp.zeros((max_quads, 6), dtype=cp.float32)          # Per-quad data (opacity + inverse covariance + radii)
-        gpu_visible_count = cp.zeros(1, dtype=cp.int32)                    # Counter for visible quads
-        
-        self.quad_generation_kernel((grid_size,), (block_size,),
-                                  (gpu_quad_params, gpu_cov2d, gpu_visibility_mask,
-                                   gpu_colors_sorted, gpu_opacities_sorted,
-                                   gpu_quad_vertices, gpu_quad_uvs, gpu_quad_data,
-                                   gpu_visible_count, self.num_points))
-        
-        # Get the actual number of visible quads
-        visible_count = int(cp.asnumpy(gpu_visible_count)[0])
+        # Skip quad generation when using instanced rendering
+        visible_count = self.num_points  # All quads are visible
         
         # Generate instance data for future instanced rendering (Step 3)
         gpu_instance_data = cp.zeros((self.num_points, 10), dtype=cp.float32)  # 10 floats per instance
@@ -535,26 +503,9 @@ class PointRenderer:
         self.transform_perspective_kernel((grid_size,), (block_size,), 
                                         (gpu_p, gpu_view_space_sorted, gpu_transformed_positions, self.num_points))
         
-        # Skip visibility culling - render all quads for performance
-        # Just use the data as-is without compaction
-        visible_count = self.num_points  # Treat all as visible
-        
-        # Transfer data to CPU without compaction
-        quad_vertices = cp.asnumpy(gpu_quad_vertices).reshape(-1, 8)  # Reshape to proper format
-        quad_uvs = cp.asnumpy(gpu_quad_uvs).reshape(-1, 2)
-        quad_data = cp.asnumpy(gpu_quad_data)
-        
-        # Transfer debug data
-        transformed_positions = cp.asnumpy(gpu_transformed_positions)
-        colors_sorted = cp.asnumpy(gpu_colors_sorted)
-        cov2d_data = cp.asnumpy(gpu_cov2d)
-        quad_params = cp.asnumpy(gpu_quad_params)
-        visibility_mask = cp.asnumpy(gpu_visibility_mask)
+        # No need to transfer quad data when using instanced rendering
         
         
-        # Set up quad VAO and VBOs if not already done
-        if self.quad_vao is None:
-            self._setup_quad_rendering()
         
         # Create instance VBO if not already done (Step 3)
         if self.instance_vbo is None:
@@ -565,85 +516,13 @@ class PointRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
         glBufferData(GL_ARRAY_BUFFER, instance_data.nbytes, instance_data, GL_DYNAMIC_DRAW)
         
-        # Toggle for A/B testing - use instanced rendering
-        use_instanced_rendering = True  # Set to True to use instanced rendering
+        # Set up instanced rendering if not done
+        if self.instanced_vao is None:
+            self._setup_instanced_rendering()
         
-        if use_instanced_rendering:
-            # Set up instanced rendering if not done
-            if self.instanced_vao is None:
-                self._setup_instanced_rendering()
-            
-            # Render using instanced rendering
-            self._render_instanced(self.num_points, viewport_width, viewport_height)
-        else:
-            # Render quads if we have any visible ones (old method)
-            if visible_count > 0:
-                self._render_quads(quad_vertices, quad_uvs, quad_data, visible_count, viewport_width, viewport_height)
-        
-        # Render quads as points (new method that doesn't require index generation)
-        # render_quads_as_points = False
-        # if render_quads_as_points:
-        #     opacities_sorted = cp.asnumpy(gpu_opacities_sorted)
-        #     self._render_quads_as_points(quad_params, colors_sorted, opacities_sorted, visibility_mask)
-        # else:
-        #     # Original point rendering for comparison/debugging
-        #     # Create interleaved vertex data with transformed positions and sorted colors
-        #     vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
-        #     vertex_data[:, :3] = transformed_positions
-        #     vertex_data[:, 3:6] = colors_sorted
-        #     vertex_data = vertex_data.flatten()
-        
-        #     # Update VBO with transformed data
-        #     glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        #     glBufferSubData(GL_ARRAY_BUFFER, 0, vertex_data.nbytes, vertex_data)
-        
-        #     # Render using shader (no MVP uniform needed)
-        #     glUseProgram(self.shader_program)
-        
-        #     glBindVertexArray(self.vao)
-        #     glDrawArrays(GL_POINTS, 0, self.num_points)
-        #     glBindVertexArray(0)
-        
-        #     glUseProgram(0)
+        # Render using instanced rendering
+        self._render_instanced(self.num_points, viewport_width, viewport_height)
     
-    def _setup_quad_rendering(self):
-        """Set up OpenGL objects for quad rendering"""
-        # Create quad VAO and VBOs
-        self.quad_vao = glGenVertexArrays(1)
-        self.quad_vbo = glGenBuffers(1)           # Vertex positions, colors, and center
-        self.quad_uv_vbo = glGenBuffers(1)        # UV coordinates
-        self.quad_data_vbo = glGenBuffers(1)      # Per-quad data part 1 (opacity, inverse covariance)
-        self.quad_radii_vbo = glGenBuffers(1)     # Per-quad data part 2 (radii)
-        
-        glBindVertexArray(self.quad_vao)
-        
-        # Set up vertex buffer (8 floats per vertex: x,y,z,r,g,b,center_x,center_y)
-        glBindBuffer(GL_ARRAY_BUFFER, self.quad_vbo)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * 4, None)           # Position
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * 4, ctypes.c_void_p(3 * 4))  # Color
-        glEnableVertexAttribArray(1)
-        glVertexAttribPointer(5, 2, GL_FLOAT, GL_FALSE, 8 * 4, ctypes.c_void_p(6 * 4))  # Gaussian center
-        glEnableVertexAttribArray(5)
-        
-        # Set up UV coordinates buffer (2 floats per vertex: u,v)
-        glBindBuffer(GL_ARRAY_BUFFER, self.quad_uv_vbo)
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 2 * 4, None)           # UV coordinates
-        glEnableVertexAttribArray(2)
-        
-        # Set up per-quad data buffer part 1 (4 floats per quad: opacity, inv_cov_00, inv_cov_01, inv_cov_11)
-        # This data needs to be duplicated for each vertex of the quad
-        glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
-        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 4 * 4, None)           # Quad data part 1
-        glEnableVertexAttribArray(3)
-        
-        # Set up per-quad data buffer part 2 (2 floats per quad: radius_x, radius_y)
-        glBindBuffer(GL_ARRAY_BUFFER, self.quad_radii_vbo)
-        glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, 2 * 4, None)           # Quad radii
-        glEnableVertexAttribArray(4)
-        
-        glBindVertexArray(0)
-        print("Quad rendering setup complete")
     
     def _setup_instanced_rendering(self):
         """Set up OpenGL objects for instanced rendering"""
@@ -706,80 +585,6 @@ class PointRenderer:
         glBindVertexArray(0)
         print("Instanced rendering setup complete")
     
-    def _render_quads(self, quad_vertices, quad_uvs, quad_data, visible_count, viewport_width, viewport_height):
-        """Render the generated quads"""
-        # Update quad vertex buffer
-        glBindBuffer(GL_ARRAY_BUFFER, self.quad_vbo)
-        glBufferData(GL_ARRAY_BUFFER, quad_vertices.nbytes, quad_vertices, GL_DYNAMIC_DRAW)
-        
-        # Update UV buffer
-        glBindBuffer(GL_ARRAY_BUFFER, self.quad_uv_vbo)
-        glBufferData(GL_ARRAY_BUFFER, quad_uvs.nbytes, quad_uvs, GL_DYNAMIC_DRAW)
-        
-        # Split 6-component quad data into two parts
-        quad_data_part1 = quad_data[:, :4]  # opacity, inv_cov (3 components)
-        quad_radii_data = quad_data[:, 4:]   # radii (2 components)
-        
-        # Update per-quad data buffer part 1 - duplicate data for each vertex
-        quad_data_part1_per_vertex = np.repeat(quad_data_part1, 4, axis=0)
-        glBindBuffer(GL_ARRAY_BUFFER, self.quad_data_vbo)
-        glBufferData(GL_ARRAY_BUFFER, quad_data_part1_per_vertex.nbytes, quad_data_part1_per_vertex, GL_DYNAMIC_DRAW)
-        
-        # Update per-quad radii buffer - duplicate data for each vertex
-        quad_radii_per_vertex = np.repeat(quad_radii_data, 4, axis=0)
-        glBindBuffer(GL_ARRAY_BUFFER, self.quad_radii_vbo)
-        glBufferData(GL_ARRAY_BUFFER, quad_radii_per_vertex.nbytes, quad_radii_per_vertex, GL_DYNAMIC_DRAW)
-        
-        # Enable alpha blending for proper Gaussian splatting
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        
-        # Enable depth testing but disable depth writing for alpha blending
-        glEnable(GL_DEPTH_TEST)
-        glDepthFunc(GL_LESS)  # Draw if fragment is closer to camera
-        glDepthMask(GL_FALSE)  # Disable writing to depth buffer for transparent objects
-        
-        # Render quads using Gaussian shader
-        glUseProgram(self.gaussian_shader_program)
-        
-        # Set viewport uniform
-        glUniform2f(self.viewport_uniform, viewport_width, viewport_height)
-        
-        glBindVertexArray(self.quad_vao)
-        
-        # Draw as triangles (2 triangles per quad = 6 vertices per quad)
-        # But we have 4 vertices per quad, so we need to use an index buffer or draw as triangle strip
-        # For now, let's draw each quad as two triangles using GL_TRIANGLES with repeated vertices
-        # We'll need to generate proper triangle indices
-        
-        # Generate indices on GPU using CUDA kernel
-        num_indices = visible_count * 6  # 6 indices per quad (2 triangles)
-        gpu_indices = cp.zeros(num_indices, dtype=cp.uint32)
-        
-        # Launch index generation kernel
-        block_size = 256
-        grid_size = (visible_count + block_size - 1) // block_size
-        self.index_generation_kernel((grid_size,), (block_size,),
-                                   (gpu_indices, visible_count))
-        
-        # Transfer indices to CPU
-        indices = cp.asnumpy(gpu_indices)
-        
-        # Create and bind index buffer
-        ibo = glGenBuffers(1)
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo)
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, GL_STATIC_DRAW)
-        
-        # Draw all quads with a single indexed draw call
-        glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
-        
-        # Clean up index buffer
-        glDeleteBuffers(1, [ibo])
-        
-        glBindVertexArray(0)
-        glUseProgram(0)
-        glDisable(GL_BLEND)  # Clean up blending state
-        glDepthMask(GL_TRUE)  # Restore depth writing
     
     def _render_instanced(self, num_instances, viewport_width, viewport_height):
         """Render using instanced rendering"""
@@ -807,46 +612,6 @@ class PointRenderer:
         glDisable(GL_BLEND)
         glDepthMask(GL_TRUE)
     
-    def _render_quads_as_points(self, quad_params, colors_sorted, opacities_sorted, visibility_mask):
-        """Render quad centers as points without index generation"""
-        # Extract visible Gaussians only
-        visible_indices = np.where(visibility_mask > 0)[0]
-        if len(visible_indices) == 0:
-            return
-        
-        # Extract quad centers and colors for visible Gaussians
-        visible_centers = quad_params[visible_indices, :2]  # center_x, center_y from quad_params
-        visible_z = quad_params[visible_indices, 4]  # ndc_z from quad_params
-        visible_colors = colors_sorted[visible_indices]
-        visible_opacities = opacities_sorted[visible_indices]
-        
-        # Create vertex data for points (x, y, z, r, g, b)
-        point_count = len(visible_indices)
-        vertex_data = np.zeros((point_count, 6), dtype=np.float32)
-        vertex_data[:, 0] = visible_centers[:, 0]  # x in NDC
-        vertex_data[:, 1] = visible_centers[:, 1]  # y in NDC
-        vertex_data[:, 2] = visible_z  # z in NDC (with proper depth)
-        vertex_data[:, 3:6] = visible_colors
-        vertex_data = vertex_data.flatten()
-        
-        # Update VBO with point data
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)
-        
-        # Enable alpha blending for transparency
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        
-        # Render using shader
-        glUseProgram(self.shader_program)
-        glBindVertexArray(self.vao)
-        
-        # Draw as points
-        glDrawArrays(GL_POINTS, 0, point_count)
-        
-        glBindVertexArray(0)
-        glUseProgram(0)
-        glDisable(GL_BLEND)
     
     def cleanup(self):
         """Clean up OpenGL resources"""
@@ -854,25 +619,15 @@ class PointRenderer:
             glDeleteVertexArrays(1, [self.vao])
         if self.vbo:
             glDeleteBuffers(1, [self.vbo])
-        if self.quad_vao:
-            glDeleteVertexArrays(1, [self.quad_vao])
-        if self.quad_vbo:
-            glDeleteBuffers(1, [self.quad_vbo])
-        if self.quad_uv_vbo:
-            glDeleteBuffers(1, [self.quad_uv_vbo])
-        if self.quad_data_vbo:
-            glDeleteBuffers(1, [self.quad_data_vbo])
-        if self.quad_radii_vbo:
-            glDeleteBuffers(1, [self.quad_radii_vbo])
         if self.instance_vbo:
             glDeleteBuffers(1, [self.instance_vbo])
         if self.base_quad_vbo:
             glDeleteBuffers(1, [self.base_quad_vbo])
+        if hasattr(self, 'base_quad_ibo') and self.base_quad_ibo:
+            glDeleteBuffers(1, [self.base_quad_ibo])
         if self.instanced_vao:
             glDeleteVertexArrays(1, [self.instanced_vao])
         if self.shader_program:
             glDeleteProgram(self.shader_program)
-        if self.gaussian_shader_program:
-            glDeleteProgram(self.gaussian_shader_program)
         if self.instanced_shader_program:
             glDeleteProgram(self.instanced_shader_program)
