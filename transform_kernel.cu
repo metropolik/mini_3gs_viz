@@ -216,10 +216,15 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float cov2d_01 = j00*j11*cov_view_01 + j02*j12*cov_view_12 + j00*j12*cov_view_12 + j02*j11*cov_view_01;
     float cov2d_11 = j11*j11*cov_view_11 + j12*j12*cov_view_22 + 2.0f*j11*j12*cov_view_12;
     
-    // Add a larger regularization term to ensure positive definiteness
-    // This also helps with numerical stability
-    cov2d_00 += 1e-4f;
-    cov2d_11 += 1e-4f;
+    // DEBUG: Print raw projection results before regularization
+    if (idx < 3) {
+        printf("Before regularization: [[%e, %e], [%e, %e]]\n", cov2d_00, cov2d_01, cov2d_01, cov2d_11);
+    }
+    
+    // Add a much smaller regularization term to ensure positive definiteness
+    // The original 1e-4f was too large and dominating the actual values
+    cov2d_00 += 1e-8f;
+    cov2d_11 += 1e-8f;
     
     // Store 2D covariance (symmetric, so store upper triangle)
     cov2d_data[cov_offset + 0] = cov2d_00;
@@ -229,11 +234,11 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     // Compute eigenvalues for quad sizing (3σ bounds)
     // For 2x2 symmetric matrix [[a,b],[b,c]], eigenvalues are:
     // λ = (a+c ± sqrt((a-c)² + 4b²)) / 2
-    float trace = cov2d_00 + cov2d_11;
-    float det = cov2d_00 * cov2d_11 - cov2d_01 * cov2d_01;
-    float discriminant = trace * trace - 4.0f * det;
+    double trace = (double)cov2d_00 + (double)cov2d_11;
+    double det = (double)cov2d_00 * (double)cov2d_11 - (double)cov2d_01 * (double)cov2d_01;
+    double discriminant = trace * trace - 4.0 * det;
     
-    if (discriminant < 0.0f) {
+    if (discriminant < 0.0) {
         // Degenerate case, mark as invisible
         visibility_mask[idx] = 0;
         // Initialize quad params to zero
@@ -246,22 +251,27 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
         return;
     }
     
-    float sqrt_disc = sqrtf(discriminant);
-    float lambda1 = 0.5f * (trace + sqrt_disc);
-    float lambda2 = 0.5f * (trace - sqrt_disc);
+    double sqrt_disc = sqrt(discriminant);
+    float lambda1 = (float)(0.5 * (trace + sqrt_disc));
+    float lambda2 = (float)(0.5 * (trace - sqrt_disc));
     
     // Compute radii (3σ = 3 * sqrt(eigenvalue))
     // Note: eigenvalues are now in NDC space due to projection matrix scaling in Jacobian
     float radius_x = 3.0f * sqrtf(fmaxf(lambda1, 1e-6f));
     float radius_y = 3.0f * sqrtf(fmaxf(lambda2, 1e-6f));
     
-    // DEBUG: Print first gaussian's computation
-    // if (idx == 0) {
-    //     printf("DEBUG CUDA: First gaussian eigenvalues: lambda1=%f, lambda2=%f\n", lambda1, lambda2);
-    //     printf("DEBUG CUDA: Radii in NDC: rx=%f, ry=%f\n", radius_x, radius_y);
-    //     printf("DEBUG CUDA: Discriminant=%f, trace=%f, det=%f\n", discriminant, trace, det);
-    //     printf("DEBUG CUDA: 2D Covariance: [[%f, %f], [%f, %f]]\n", cov2d_00, cov2d_01, cov2d_01, cov2d_11);
-    // }
+    // DEBUG: Print first few gaussians' computation
+    if (idx < 3) {
+        printf("\n=== DEBUG CUDA: Gaussian %d ===\n", idx);
+        printf("Input scales: [%f, %f, %f]\n", sx, sy, sz);
+        printf("Input rotation (quat): [%f, %f, %f, %f]\n", qw, qx, qy, qz);
+        printf("3D covariance diagonal: [%f, %f, %f]\n", cov3d_00, cov3d_11, cov3d_22);
+        printf("2D Covariance: [[%f, %f], [%f, %f]]\n", cov2d_00, cov2d_01, cov2d_01, cov2d_11);
+        printf("Eigenvalues: lambda1=%f, lambda2=%f\n", lambda1, lambda2);
+        printf("Radii in NDC: rx=%f, ry=%f\n", radius_x, radius_y);
+        printf("Distance: %f\n", -vz);
+        printf("trace=%.12f, det=%.12f\n", (float)trace, (float)det);
+    }
     
     // Cull if quad would be too small in NDC (less than 1e-6 - very permissive)
     if (radius_x < 1e-6f || radius_y < 1e-6f) {

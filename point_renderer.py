@@ -83,32 +83,43 @@ class PointRenderer:
             float inv_cov_01 = quadData.z;
             float inv_cov_11 = quadData.w;
             
-            // MATHEMATICALLY CORRECT UV MAPPING
-            // Map UV [0,1] to actual NDC extent of this specific quad
-            // Each quad extends from -radius to +radius in NDC space
-            vec2 d = (fragUV - 0.5) * 2.0 * quadRadii;
-            
-            // NO SCALING HACK NEEDED!
-            // Both d and inv_cov are now in the same NDC coordinate space
-            float scaled_inv_cov_00 = inv_cov_00;
-            float scaled_inv_cov_01 = inv_cov_01;
-            float scaled_inv_cov_11 = inv_cov_11;
-            
-            // Compute Gaussian weight: exp(-0.5 * d^T * inv_cov * d)
-            float exponent = -0.5 * (d.x * d.x * scaled_inv_cov_00 + 
-                                    2.0 * d.x * d.y * scaled_inv_cov_01 + 
-                                    d.y * d.y * scaled_inv_cov_11);
-            
-            // Clamp to prevent numerical issues
-            exponent = max(exponent, -10.0);
-            
-            float alpha = opacity * exp(exponent);
-            
-            // Clamp alpha to valid range
-            alpha = clamp(alpha, 0.0, 1.0);
-            
-            // Output with proper alpha blending - color is full strength, alpha varies
-            FragColor = vec4(fragColor, alpha);
+            // DEBUG: Visualize radii data to see if it's being passed correctly
+            if (fragUV.x < 0.33) {
+                // Left third: Show radii as colors (scaled for visibility)
+                float radius_vis_x = quadRadii.x * 100.0; // Scale up for visibility
+                float radius_vis_y = quadRadii.y * 100.0;
+                FragColor = vec4(radius_vis_x, radius_vis_y, 0.0, 1.0);
+                return;
+            } else if (fragUV.x < 0.66) {
+                // Middle third: Show old behavior (fixed UV mapping)
+                vec2 d_old = (fragUV - 0.5) * 6.0;
+                float fixed_scale = 0.001;
+                float exponent_old = -0.5 * (d_old.x * d_old.x * inv_cov_00 * fixed_scale + 
+                                            2.0 * d_old.x * d_old.y * inv_cov_01 * fixed_scale + 
+                                            d_old.y * d_old.y * inv_cov_11 * fixed_scale);
+                exponent_old = max(exponent_old, -10.0);
+                float alpha_old = opacity * exp(exponent_old);
+                alpha_old = clamp(alpha_old, 0.0, 1.0);
+                FragColor = vec4(fragColor, alpha_old);
+                return;
+            } else {
+                // Right third: New mathematically correct approach
+                vec2 d = (fragUV - 0.5) * 2.0 * quadRadii;
+                
+                float scaled_inv_cov_00 = inv_cov_00;
+                float scaled_inv_cov_01 = inv_cov_01;
+                float scaled_inv_cov_11 = inv_cov_11;
+                
+                float exponent = -0.5 * (d.x * d.x * scaled_inv_cov_00 + 
+                                        2.0 * d.x * d.y * scaled_inv_cov_01 + 
+                                        d.y * d.y * scaled_inv_cov_11);
+                
+                exponent = max(exponent, -10.0);
+                float alpha = opacity * exp(exponent);
+                alpha = clamp(alpha, 0.0, 1.0);
+                FragColor = vec4(fragColor, alpha);
+                return;
+            }
         }
         """
         
