@@ -221,6 +221,16 @@ def main():
     glfw.set_cursor_pos_callback(window, mouse_callback)
     glfw.set_scroll_callback(window, scroll_callback)
     
+    # Print controls
+    print("\nControls:")
+    print("  1 - Gaussian rendering mode")
+    print("  2 - Flat Ball rendering mode") 
+    print("  3 - Gaussian Ball rendering mode")
+    print("  WASD - Move camera")
+    print("  Mouse - Look around")
+    print("  Scroll - Adjust speed")
+    print("  ESC - Exit\n")
+    
     # Timing
     last_frame = 0.0
     
@@ -234,6 +244,17 @@ def main():
         # Process input
         if glfw.get_key(window, glfw.KEY_ESCAPE) == glfw.PRESS:
             glfw.set_window_should_close(window, True)
+        
+        # Render mode controls
+        if glfw.get_key(window, glfw.KEY_1) == glfw.PRESS:
+            point_renderer.set_gaussian_mode()
+            print("Switched to Gaussian mode")
+        elif glfw.get_key(window, glfw.KEY_2) == glfw.PRESS:
+            point_renderer.set_flat_ball_mode()
+            print("Switched to Flat Ball mode")
+        elif glfw.get_key(window, glfw.KEY_3) == glfw.PRESS:
+            point_renderer.set_gaussian_ball_mode()
+            print("Switched to Gaussian Ball mode")
         
         camera.process_keyboard(window, delta_time)
         

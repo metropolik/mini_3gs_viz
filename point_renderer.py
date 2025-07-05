@@ -55,6 +55,7 @@ class PointRenderer:
         out vec4 FragColor;
         
         uniform vec2 viewport;  // Viewport dimensions (width, height)
+        uniform int render_mod;  // Render mode: 0=gaussian, -3=flat ball, -4=gaussian ball
         
         void main()
         {
@@ -78,11 +79,14 @@ class PointRenderer:
             float alpha = opacity * exp(exponent);
             alpha = clamp(alpha, 0.0, 1.0);
             
-            // DEBUG: Visualize distance from center with color gradient
-            // Uncomment to see distance visualization
-            // float dist = length(d) * 10.0; // Scale for visibility
-            // FragColor = vec4(dist, 1.0 - dist, 0.0, alpha);
-            // return;
+            // Handle rendering modes
+            if (render_mod == -3) {  // Flat Ball
+                alpha = alpha > 0.22 ? 1.0 : 0.0;
+            } else if (render_mod == -4) {  // Gaussian Ball
+                alpha = alpha > 0.22 ? 1.0 : 0.0;
+                FragColor = vec4(fragColor * exp(exponent), alpha);
+                return;
+            }
             
             FragColor = vec4(fragColor, alpha);
         }
@@ -179,6 +183,9 @@ class PointRenderer:
         self.opacity = None             # Opacity values (CPU)
         self.use_cuda = False  # Disable CUDA for now
         
+        # Render mode control
+        self.render_mode = 0  # 0=gaussian, -3=flat ball, -4=gaussian ball
+        
         # CUDA kernels for transformations
         self.transform_kernel = None
         self.transform_perspective_kernel = None
@@ -259,8 +266,9 @@ class PointRenderer:
         glDeleteShader(vertex_shader)
         glDeleteShader(fragment_shader)
         
-        # Get uniform location for viewport
+        # Get uniform locations
         self.instanced_viewport_uniform = glGetUniformLocation(self.instanced_shader_program, "viewport")
+        self.instanced_render_mod_uniform = glGetUniformLocation(self.instanced_shader_program, "render_mod")
     
     def _load_transform_kernel(self):
         """Load the custom CUDA transform kernels"""
@@ -600,8 +608,9 @@ class PointRenderer:
         # Use instanced shader program
         glUseProgram(self.instanced_shader_program)
         
-        # Set viewport uniform
+        # Set uniforms
         glUniform2f(self.instanced_viewport_uniform, viewport_width, viewport_height)
+        glUniform1i(self.instanced_render_mod_uniform, self.render_mode)
         
         # Bind VAO and render
         glBindVertexArray(self.instanced_vao)
@@ -612,6 +621,21 @@ class PointRenderer:
         glDisable(GL_BLEND)
         glDepthMask(GL_TRUE)
     
+    def set_render_mode(self, mode):
+        """Set rendering mode: 0=gaussian, -3=flat ball, -4=gaussian ball"""
+        self.render_mode = mode
+    
+    def set_gaussian_mode(self):
+        """Set to normal Gaussian splatting mode"""
+        self.render_mode = 0
+    
+    def set_flat_ball_mode(self):
+        """Set to flat ball rendering mode"""
+        self.render_mode = -3
+    
+    def set_gaussian_ball_mode(self):
+        """Set to Gaussian ball rendering mode"""
+        self.render_mode = -4
     
     def cleanup(self):
         """Clean up OpenGL resources"""
