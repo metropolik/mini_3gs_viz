@@ -192,19 +192,24 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     
     // For point (x,y,z) in view space, clip coords are (fx*x, fy*y, ...) before division by w
     // Jacobian J = [[fx/z, 0, -fx*x/z^2], [0, fy/z, -fy*y/z^2]]
-    float inv_z = 1.0f / (-vz);  // Note: vz is negative in view space
+    // Use absolute value to ensure consistent coordinate system handling
+    float inv_z = 1.0f / fabsf(vz);  // Use absolute value for robustness
     float inv_z2 = inv_z * inv_z;
     
     // Jacobian matrix elements with projection matrix scaling
+    // J = [[fx/z, 0, -fx*x/z²], [0, fy/z, -fy*y/z²]]
     float j00 = fx * inv_z;
-    float j02 = fx * vx * inv_z2;
+    float j02 = -fx * vx * inv_z2;  // Added missing negative sign
     float j11 = fy * inv_z;
-    float j12 = fy * vy * inv_z2;
+    float j12 = -fy * vy * inv_z2;  // Added missing negative sign
     
     // Compute 2D covariance: Σ_2D = J * Σ_view * J^T
-    // The Jacobian includes depth derivatives which are important
+    // J = [[j00, 0, j02], [0, j11, j12]]
+    // Σ_view = [[cov_view_00, cov_view_01, cov_view_02],
+    //           [cov_view_01, cov_view_11, cov_view_12],
+    //           [cov_view_02, cov_view_12, cov_view_22]]
     float cov2d_00 = j00*j00*cov_view_00 + j02*j02*cov_view_22 + 2.0f*j00*j02*cov_view_02;
-    float cov2d_01 = j00*j11*cov_view_01 + j02*j12*cov_view_12 + j00*j12*cov_view_12 + j02*j11*cov_view_01;
+    float cov2d_01 = j00*j11*cov_view_01 + j02*j12*cov_view_22 + j00*j12*cov_view_02 + j02*j11*cov_view_01;
     float cov2d_11 = j11*j11*cov_view_11 + j12*j12*cov_view_22 + 2.0f*j11*j12*cov_view_12;
     
     
