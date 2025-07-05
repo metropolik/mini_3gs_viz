@@ -190,6 +190,23 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float fx = proj_matrix[0];   // P[0,0] = focal_x / aspect
     float fy = proj_matrix[5];   // P[1,1] = focal_y
     
+    // Apply viewport clamping (following working shader approach)
+    // Calculate FOV tangents from projection matrix
+    float tan_fovx = 1.0f / fx;  // tan(fov_x/2)
+    float tan_fovy = 1.0f / fy;  // tan(fov_y/2)
+    float limx = 1.3f * tan_fovx;
+    float limy = 1.3f * tan_fovy;
+    
+    // Clamp the view space position to prevent extreme values
+    float txtz = vx / vz;
+    float tytz = vy / vz;
+    txtz = fminf(limx, fmaxf(-limx, txtz));
+    tytz = fminf(limy, fmaxf(-limy, tytz));
+    
+    // Update view space position with clamped values
+    float clamped_vx = txtz * vz;
+    float clamped_vy = tytz * vz;
+    
     // For point (x,y,z) in view space, clip coords are (fx*x, fy*y, ...) before division by w
     // Jacobian J = [[fx/z, 0, -fx*x/z^2], [0, fy/z, -fy*y/z^2]]
     // Use absolute value to ensure consistent coordinate system handling
@@ -198,10 +215,11 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     
     // Jacobian matrix elements with projection matrix scaling
     // J = [[fx/z, 0, -fx*x/z²], [0, fy/z, -fy*y/z²]]
+    // Use clamped values for stable Jacobian computation
     float j00 = fx * inv_z;
-    float j02 = -fx * vx * inv_z2;  // Added missing negative sign
+    float j02 = -fx * clamped_vx * inv_z2;  // Use clamped value
     float j11 = fy * inv_z;
-    float j12 = -fy * vy * inv_z2;  // Added missing negative sign
+    float j12 = -fy * clamped_vy * inv_z2;  // Use clamped value
     
     // Compute 2D covariance: Σ_2D = J * Σ_view * J^T
     // J = [[j00, 0, j02], [0, j11, j12]]
@@ -213,10 +231,13 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float cov2d_11 = j11*j11*cov_view_11 + j12*j12*cov_view_22 + 2.0f*j11*j12*cov_view_12;
     
     
-    // Add a much smaller regularization term to ensure positive definiteness
-    // The original 1e-4f was too large and dominating the actual values
-    cov2d_00 += 1e-8f;
-    cov2d_11 += 1e-8f;
+    // Add regularization term to ensure positive definiteness
+    // Following the working shader implementation (0.3f regularization)
+    //cov2d_00 += 0.3f;
+    //cov2d_11 += 0.3f;
+    cov2d_00 += 1e-6;
+    cov2d_11 += 1e-6;
+
     
     // Store 2D covariance (symmetric, so store upper triangle)
     cov2d_data[cov_offset + 0] = cov2d_00;
