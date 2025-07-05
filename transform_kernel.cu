@@ -134,7 +134,7 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float qy = rotations[rot_offset + 2];
     float qz = rotations[rot_offset + 3];
     
-    // Build 3D covariance matrix: Σ_3D = R * S * S^T * R^T
+    // Build 3D covariance matrix: Σ = R * S * S^T * R^T (following paper)
     // First build rotation matrix R from quaternion
     float r11 = 1.0f - 2.0f * (qy*qy + qz*qz);
     float r12 = 2.0f * (qx*qy - qw*qz);
@@ -146,48 +146,33 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float r32 = 2.0f * (qy*qz + qw*qx);
     float r33 = 1.0f - 2.0f * (qx*qx + qy*qy);
     
-    // Compute R * S (rotation times scaling)
-    float rs11 = r11 * sx, rs12 = r12 * sy, rs13 = r13 * sz;
-    float rs21 = r21 * sx, rs22 = r22 * sy, rs23 = r23 * sz;
-    float rs31 = r31 * sx, rs32 = r32 * sy, rs33 = r33 * sz;
+    // S * S^T is diagonal with squared scale values
+    float sx2 = sx * sx;
+    float sy2 = sy * sy;
+    float sz2 = sz * sz;
     
-    // Compute 3D covariance: (R*S) * (R*S)^T
-    float cov3d_00 = rs11*rs11 + rs12*rs12 + rs13*rs13;
-    float cov3d_01 = rs11*rs21 + rs12*rs22 + rs13*rs23;
-    float cov3d_02 = rs11*rs31 + rs12*rs32 + rs13*rs33;
-    float cov3d_11 = rs21*rs21 + rs22*rs22 + rs23*rs23;
-    float cov3d_12 = rs21*rs31 + rs22*rs32 + rs23*rs33;
-    float cov3d_22 = rs31*rs31 + rs32*rs32 + rs33*rs33;
+    // Compute R * S * S^T * R^T
+    // First compute R * S^2 (S^2 is diagonal, so this scales rows of R)
+    float rs11 = r11 * sx2, rs12 = r12 * sy2, rs13 = r13 * sz2;
+    float rs21 = r21 * sx2, rs22 = r22 * sy2, rs23 = r23 * sz2;
+    float rs31 = r31 * sx2, rs32 = r32 * sy2, rs33 = r33 * sz2;
     
-    // Apply viewing transformation W to the 3D covariance: Σ' = W * Σ_3D * W^T
+    // Now compute (R * S^2) * R^T
+    float cov3d_00 = rs11*r11 + rs12*r12 + rs13*r13;
+    float cov3d_01 = rs11*r21 + rs12*r22 + rs13*r23;
+    float cov3d_02 = rs11*r31 + rs12*r32 + rs13*r33;
+    float cov3d_11 = rs21*r21 + rs22*r22 + rs23*r23;
+    float cov3d_12 = rs21*r31 + rs22*r32 + rs23*r33;
+    float cov3d_22 = rs31*r31 + rs32*r32 + rs33*r33;
+    
+    // Following working shader approach: compute T = W * J, then cov2D = T^T * transpose(cov3D) * T
     // Extract the 3x3 rotation part of the model-view matrix (upper-left 3x3)
     float w00 = mv_matrix[0], w01 = mv_matrix[1], w02 = mv_matrix[2];
     float w10 = mv_matrix[4], w11 = mv_matrix[5], w12 = mv_matrix[6];
     float w20 = mv_matrix[8], w21 = mv_matrix[9], w22 = mv_matrix[10];
     
-    // Compute W * Σ_3D
-    float ws00 = w00*cov3d_00 + w01*cov3d_01 + w02*cov3d_02;
-    float ws01 = w00*cov3d_01 + w01*cov3d_11 + w02*cov3d_12;
-    float ws02 = w00*cov3d_02 + w01*cov3d_12 + w02*cov3d_22;
-    float ws10 = w10*cov3d_00 + w11*cov3d_01 + w12*cov3d_02;
-    float ws11 = w10*cov3d_01 + w11*cov3d_11 + w12*cov3d_12;
-    float ws12 = w10*cov3d_02 + w11*cov3d_12 + w12*cov3d_22;
-    float ws20 = w20*cov3d_00 + w21*cov3d_01 + w22*cov3d_02;
-    float ws21 = w20*cov3d_01 + w21*cov3d_11 + w22*cov3d_12;
-    float ws22 = w20*cov3d_02 + w21*cov3d_12 + w22*cov3d_22;
-    
-    // Compute (W * Σ_3D) * W^T to get view space covariance
-    float cov_view_00 = ws00*w00 + ws01*w01 + ws02*w02;
-    float cov_view_01 = ws00*w10 + ws01*w11 + ws02*w12;
-    float cov_view_02 = ws00*w20 + ws01*w21 + ws02*w22;
-    float cov_view_11 = ws10*w10 + ws11*w11 + ws12*w12;
-    float cov_view_12 = ws10*w20 + ws11*w21 + ws12*w22;
-    float cov_view_22 = ws20*w20 + ws21*w21 + ws22*w22;
-    
-    // Project to screen space using Jacobian of perspective projection
-    // The projection matrix transforms (x,y,z) to (fx*x/z, fy*y/z) where fx, fy are from proj matrix
     // Extract focal length scaling from projection matrix
-    float fx = proj_matrix[0];   // P[0,0] = focal_x / aspect
+    float fx = proj_matrix[0];   // P[0,0] = focal_x / aspect  
     float fy = proj_matrix[5];   // P[1,1] = focal_y
     
     // Apply viewport clamping (following working shader approach)
@@ -207,28 +192,55 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float clamped_vx = txtz * vz;
     float clamped_vy = tytz * vz;
     
-    // For point (x,y,z) in view space, clip coords are (fx*x, fy*y, ...) before division by w
-    // Jacobian J = [[fx/z, 0, -fx*x/z^2], [0, fy/z, -fy*y/z^2]]
-    // Use absolute value to ensure consistent coordinate system handling
-    float inv_z = 1.0f / fabsf(vz);  // Use absolute value for robustness
+    // Build Jacobian matrix J = [[fx/z, 0, -fx*x/z²], [0, fy/z, -fy*y/z²], [0, 0, 0]]
+    float inv_z = 1.0f / fabsf(vz);
     float inv_z2 = inv_z * inv_z;
     
-    // Jacobian matrix elements with projection matrix scaling
-    // J = [[fx/z, 0, -fx*x/z²], [0, fy/z, -fy*y/z²]]
-    // Use clamped values for stable Jacobian computation
     float j00 = fx * inv_z;
-    float j02 = -fx * clamped_vx * inv_z2;  // Use clamped value
+    float j01 = 0.0f;
+    float j02 = -fx * clamped_vx * inv_z2;
+    float j10 = 0.0f;
     float j11 = fy * inv_z;
-    float j12 = -fy * clamped_vy * inv_z2;  // Use clamped value
+    float j12 = -fy * clamped_vy * inv_z2;
     
-    // Compute 2D covariance: Σ_2D = J * Σ_view * J^T
-    // J = [[j00, 0, j02], [0, j11, j12]]
-    // Σ_view = [[cov_view_00, cov_view_01, cov_view_02],
-    //           [cov_view_01, cov_view_11, cov_view_12],
-    //           [cov_view_02, cov_view_12, cov_view_22]]
-    float cov2d_00 = j00*j00*cov_view_00 + j02*j02*cov_view_22 + 2.0f*j00*j02*cov_view_02;
-    float cov2d_01 = j00*j11*cov_view_01 + j02*j12*cov_view_22 + j00*j12*cov_view_02 + j02*j11*cov_view_01;
-    float cov2d_11 = j11*j11*cov_view_11 + j12*j12*cov_view_22 + 2.0f*j11*j12*cov_view_12;
+    // Compute T = W * J (3x3 matrix multiplication)
+    float t00 = w00*j00 + w01*j10;  // w01*j10 = w01*0 = 0
+    float t01 = w00*j01 + w01*j11;  // w00*j01 = w00*0 = 0
+    float t02 = w00*j02 + w01*j12;
+    float t10 = w10*j00 + w11*j10;  // w11*j10 = w11*0 = 0
+    float t11 = w10*j01 + w11*j11;  // w10*j01 = w10*0 = 0  
+    float t12 = w10*j02 + w11*j12;
+    float t20 = w20*j00 + w21*j10;  // w21*j10 = w21*0 = 0
+    float t21 = w20*j01 + w21*j11;  // w20*j01 = w20*0 = 0
+    float t22 = w20*j02 + w21*j12;
+    
+    // Simplified T matrix (many terms are 0):
+    t00 = w00*j00;  // = w00*fx/z
+    t01 = w01*j11;  // = w01*fy/z  
+    t02 = w00*j02 + w01*j12;
+    t10 = w10*j00;  // = w10*fx/z
+    t11 = w11*j11;  // = w11*fy/z
+    t12 = w10*j02 + w11*j12;  
+    t20 = w20*j00;  // = w20*fx/z
+    t21 = w21*j11;  // = w21*fy/z
+    t22 = w20*j02 + w21*j12;
+    
+    // Compute 2D covariance: cov2D = T^T * transpose(cov3D) * T
+    // First compute transpose(cov3D) * T
+    float ct00 = cov3d_00*t00 + cov3d_01*t10 + cov3d_02*t20;
+    float ct01 = cov3d_00*t01 + cov3d_01*t11 + cov3d_02*t21;
+    float ct02 = cov3d_00*t02 + cov3d_01*t12 + cov3d_02*t22;
+    float ct10 = cov3d_01*t00 + cov3d_11*t10 + cov3d_12*t20;
+    float ct11 = cov3d_01*t01 + cov3d_11*t11 + cov3d_12*t21;
+    float ct12 = cov3d_01*t02 + cov3d_11*t12 + cov3d_12*t22;
+    float ct20 = cov3d_02*t00 + cov3d_12*t10 + cov3d_22*t20;
+    float ct21 = cov3d_02*t01 + cov3d_12*t11 + cov3d_22*t21;
+    float ct22 = cov3d_02*t02 + cov3d_12*t12 + cov3d_22*t22;
+    
+    // Now compute T^T * (transpose(cov3D) * T) = T^T * CT
+    float cov2d_00 = t00*ct00 + t10*ct10 + t20*ct20;
+    float cov2d_01 = t00*ct01 + t10*ct11 + t20*ct21;
+    float cov2d_11 = t01*ct01 + t11*ct11 + t21*ct21;
     
     
     // Add regularization term to ensure positive definiteness
