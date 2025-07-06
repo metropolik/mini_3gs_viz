@@ -608,11 +608,20 @@ class PointRenderer:
         visible_count = self.num_points  # All quads are visible
         
         # Generate instance data for future instanced rendering (Step 3)
-        gpu_instance_data = cp.zeros((self.num_points, 10), dtype=cp.float32)  # 10 floats per instance
-        self.instance_generation_kernel((grid_size,), (block_size,),
-                                      (gpu_quad_params, gpu_cov2d, gpu_visibility_mask,
-                                       gpu_colors_sorted, gpu_opacities_sorted,
-                                       gpu_instance_data, self.num_points))
+        # Use Python implementation instead of CUDA kernel
+        instance_data = np.zeros((self.num_points, 10), dtype=np.float32)
+        colors_sorted_np = cp.asnumpy(gpu_colors_sorted)
+        opacities_sorted_np = cp.asnumpy(gpu_opacities_sorted)
+        
+        transform.generate_instance_data(quad_params.reshape(-1),
+                                       cov2d.reshape(-1),
+                                       visibility_mask.reshape(-1),
+                                       colors_sorted_np.reshape(-1),
+                                       opacities_sorted_np.reshape(-1),
+                                       instance_data.reshape(-1),
+                                       self.num_points)
+        
+        gpu_instance_data = cp.asarray(instance_data)
         
         # Second transformation: Apply Projection matrix with perspective division (for point centers - for debugging)
         # Use Python implementation instead of CUDA kernel
