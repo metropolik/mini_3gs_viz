@@ -224,8 +224,9 @@ def main():
     # Print controls
     print("\nControls:")
     print("  1 - Gaussian rendering mode")
-    print("  2 - Flat Ball rendering mode") 
-    print("  3 - Gaussian Ball rendering mode")
+    print("  2 - Billboard rendering mode")
+    print("  3 - Flat Ball rendering mode") 
+    print("  4 - Gaussian Ball rendering mode")
     print("  WASD - Move camera")
     print("  Mouse - Look around")
     print("  Scroll - Adjust speed")
@@ -250,9 +251,12 @@ def main():
             point_renderer.set_gaussian_mode()
             print("Switched to Gaussian mode")
         elif glfw.get_key(window, glfw.KEY_2) == glfw.PRESS:
+            point_renderer.set_billboard_mode()
+            print("Switched to Billboard mode")
+        elif glfw.get_key(window, glfw.KEY_3) == glfw.PRESS:
             point_renderer.set_flat_ball_mode()
             print("Switched to Flat Ball mode")
-        elif glfw.get_key(window, glfw.KEY_3) == glfw.PRESS:
+        elif glfw.get_key(window, glfw.KEY_4) == glfw.PRESS:
             point_renderer.set_gaussian_ball_mode()
             print("Switched to Gaussian Ball mode")
         

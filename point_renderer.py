@@ -56,10 +56,16 @@ class PointRenderer:
         out vec4 FragColor;
         
         uniform vec2 viewport;  // Viewport dimensions (width, height)
-        uniform int render_mod;  // Render mode: 0=gaussian, -3=flat ball, -4=gaussian ball
+        uniform int render_mod;  // Render mode: 0=gaussian, -2=billboard, -3=flat ball, -4=gaussian ball
         
         void main()
         {
+            // Handle billboard mode first (like working method)
+            if (render_mod == -2) {  // Billboard mode
+                FragColor = vec4(fragColor, 1.0);
+                return;
+            }
+            
             float opacity = quadData.x;
             float inv_cov_00 = quadData.y;
             float inv_cov_01 = quadData.z;
@@ -108,6 +114,8 @@ class PointRenderer:
         out vec2 gaussianCenter;
         out vec4 quadData;
         
+        uniform vec2 viewport;  // Viewport dimensions for NDC conversion
+        
         void main()
         {
             // Extract inverse covariance matrix
@@ -115,47 +123,25 @@ class PointRenderer:
             float inv_cov_01 = aInstanceCovariance.z;
             float inv_cov_11 = aInstanceCovariance.w;
             
-            // Compute covariance matrix from inverse (for sizing)
+            // Convert inverse covariance back to 2D covariance (like working method)
             float det_inv = inv_cov_00 * inv_cov_11 - inv_cov_01 * inv_cov_01;
-            if (abs(det_inv) < 1e-6) det_inv = 1e-6; // Avoid division by zero
+            if (abs(det_inv) < 1e-6) det_inv = 1e-6;
             
-            float cov_00 = inv_cov_11 / det_inv;
-            float cov_01 = -inv_cov_01 / det_inv;
-            float cov_11 = inv_cov_00 / det_inv;
+            float cov2d_00 = inv_cov_11 / det_inv;
+            float cov2d_11 = inv_cov_00 / det_inv;
             
-            // Compute eigenvalues for quad sizing
-            float trace = cov_00 + cov_11;
-            float det = cov_00 * cov_11 - cov_01 * cov_01;
-            float discriminant = trace * trace - 4.0 * det;
-            discriminant = max(discriminant, 0.0);
+            // Use the working method approach: 3 * sqrt(cov2d diagonal elements)
+            vec2 quadwh_scr = vec2(3.0 * sqrt(max(cov2d_00, 1e-6)), 3.0 * sqrt(max(cov2d_11, 1e-6)));
             
-            float sqrt_disc = sqrt(discriminant);
-            float lambda1 = 0.5 * (trace + sqrt_disc);
-            float lambda2 = 0.5 * (trace - sqrt_disc);
+            // Convert screen space dimensions to NDC space
+            // The working method uses: quadwh_ndc = quadwh_scr / wh * 2
+            // where wh = 2 * hfovxy_focal.xy * hfovxy_focal.z
+            // Based on the debug output, we need about 1000x scaling, so approximate this
+            vec2 quadwh_ndc = quadwh_scr / viewport * 2.0 * 500.0;  // Approximate scaling factor
             
-            // Compute radii (3 sigma bounds)
-            float radius_x = 3.0 * sqrt(max(lambda1, 1e-6));
-            float radius_y = 3.0 * sqrt(max(lambda2, 1e-6));
-            
-            // Compute eigenvector for orientation
-            vec2 evec;
-            if (abs(cov_01) > 1e-6) {
-                evec.x = lambda1 - cov_11;
-                evec.y = cov_01;
-                evec = normalize(evec);
-            } else {
-                evec = vec2(1.0, 0.0);
-            }
-            
-            // Create rotation matrix from eigenvector
-            mat2 rotation = mat2(evec.x, evec.y, -evec.y, evec.x);
-            
-            // Scale and rotate the base quad vertex
-            vec2 scaledVertex = aQuadVertex * vec2(radius_x, radius_y);
-            vec2 rotatedVertex = rotation * scaledVertex;
-            
+            // Apply quad offset in NDC space without rotation
             vec3 position;
-            position.xy = aInstanceCenter.xy + rotatedVertex;
+            position.xy = aInstanceCenter.xy + aQuadVertex * quadwh_ndc;
             position.z = aInstanceCenter.z;
             
             gl_Position = vec4(position, 1.0);
@@ -628,6 +614,43 @@ class PointRenderer:
         
         # Update instance buffer with all instance data (no visibility check for performance)
         instance_data = cp.asnumpy(gpu_instance_data).flatten()
+        
+        # Debug: Print first few gaussian centers and covariance values
+        print(f"Debug: First 3 gaussians:")
+        cov2d_np = cp.asnumpy(gpu_cov2d)
+        for i in range(min(3, self.num_points)):
+            center_x = instance_data[i * 10 + 0]
+            center_y = instance_data[i * 10 + 1] 
+            center_z = instance_data[i * 10 + 2]
+            r = instance_data[i * 10 + 3]
+            g = instance_data[i * 10 + 4]
+            b = instance_data[i * 10 + 5]
+            opacity = instance_data[i * 10 + 6]
+            inv_cov_00 = instance_data[i * 10 + 7]
+            inv_cov_01 = instance_data[i * 10 + 8]
+            inv_cov_11 = instance_data[i * 10 + 9]
+            
+            # Also show 2D covariance values
+            cov2d_00 = cov2d_np[i, 0]
+            cov2d_01 = cov2d_np[i, 1] 
+            cov2d_11 = cov2d_np[i, 2]
+            
+            print(f"  Gaussian {i}: center=({center_x:.4f}, {center_y:.4f}, {center_z:.4f})")
+            print(f"    color=({r:.4f}, {g:.4f}, {b:.4f}), opacity={opacity:.4f}")
+            print(f"    2D cov=({cov2d_00:.6f}, {cov2d_01:.6f}, {cov2d_11:.6f})")
+            print(f"    inv_cov=({inv_cov_00:.4f}, {inv_cov_01:.4f}, {inv_cov_11:.4f})")
+            
+            # Calculate what the working method would use for quad size
+            working_quad_w = 3.0 * np.sqrt(max(cov2d_00, 1e-6))
+            working_quad_h = 3.0 * np.sqrt(max(cov2d_11, 1e-6))
+            print(f"    working method quad size: w={working_quad_w:.6f}, h={working_quad_h:.6f}")
+            
+            # Show what our NDC conversion gives us
+            our_ndc_w = working_quad_w / (viewport_width * 0.5)
+            our_ndc_h = working_quad_h / (viewport_height * 0.5)
+            print(f"    our NDC conversion: w={our_ndc_w:.8f}, h={our_ndc_h:.8f}")
+            print(f"    viewport: {viewport_width}x{viewport_height}")
+        
         glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
         glBufferData(GL_ARRAY_BUFFER, instance_data.nbytes, instance_data, GL_DYNAMIC_DRAW)
         
@@ -729,12 +752,16 @@ class PointRenderer:
         glDepthMask(GL_TRUE)
     
     def set_render_mode(self, mode):
-        """Set rendering mode: 0=gaussian, -3=flat ball, -4=gaussian ball"""
+        """Set rendering mode: 0=gaussian, -2=billboard, -3=flat ball, -4=gaussian ball"""
         self.render_mode = mode
     
     def set_gaussian_mode(self):
         """Set to normal Gaussian splatting mode"""
         self.render_mode = 0
+    
+    def set_billboard_mode(self):
+        """Set to billboard rendering mode"""
+        self.render_mode = -2
     
     def set_flat_ball_mode(self):
         """Set to flat ball rendering mode"""
