@@ -18,32 +18,6 @@ class PointRenderer:
         """Initialize point renderer with optional PLY file"""
         self.ply_path = ply_path
         
-        # Shader source code - now expects pre-transformed vertices
-        self.vertex_shader_source = """
-        #version 330 core
-        layout (location = 0) in vec3 aPos;
-        layout (location = 1) in vec3 aColor;
-        
-        out vec3 color;
-        
-        void main()
-        {
-            gl_Position = vec4(aPos, 1.0);
-            gl_PointSize = 10.0;
-            color = aColor;
-        }
-        """
-        
-        self.fragment_shader_source = """
-        #version 330 core
-        in vec3 color;
-        out vec4 FragColor;
-        
-        void main()
-        {
-            FragColor = vec4(color, 1.0);
-        }
-        """
         
         # Copy working method's fragment shader exactly
         self.gaussian_fragment_shader_source = """
@@ -206,11 +180,8 @@ class PointRenderer:
         }
         """
         
-        # OpenGL objects
-        self.shader_program = None
+        # OpenGL objects - instanced rendering only
         self.instanced_shader_program = None  # Shader program for instanced rendering
-        self.vao = None
-        self.vbo = None
         self.instance_vbo = None    # VBO for instance data
         self.base_quad_vbo = None   # VBO for base quad geometry
         self.instanced_vao = None   # VAO for instanced rendering
@@ -235,25 +206,16 @@ class PointRenderer:
         
         # Initialize if PLY file is provided, otherwise use hardcoded Gaussians
         if ply_path and os.path.exists(ply_path):
-            self._setup_shaders()
             self._setup_instanced_shaders()
             self._load_ply()
-            # Enable point size control
-            glEnable(GL_PROGRAM_POINT_SIZE)
         elif ply_path:
             print(f"PLY file '{ply_path}' not found, using hardcoded Gaussians for idle visualization")
-            self._setup_shaders()
             self._setup_instanced_shaders()
             self._create_naive_gaussians()
-            # Enable point size control
-            glEnable(GL_PROGRAM_POINT_SIZE)
         else:
             print("No PLY file provided, using hardcoded Gaussians for idle visualization")
-            self._setup_shaders()
             self._setup_instanced_shaders()
             self._create_naive_gaussians()
-            # Enable point size control
-            glEnable(GL_PROGRAM_POINT_SIZE)
     
     def _compile_shader(self, source, shader_type):
         """Compile a shader from source"""
@@ -266,31 +228,6 @@ class PointRenderer:
             raise RuntimeError(f"Shader compilation failed: {error}")
         
         return shader
-    
-    def _setup_shaders(self):
-        """Create and compile shaders"""
-        print("Setting up point shaders...")
-        
-        # Compile shaders
-        vertex_shader = self._compile_shader(self.vertex_shader_source, GL_VERTEX_SHADER)
-        fragment_shader = self._compile_shader(self.fragment_shader_source, GL_FRAGMENT_SHADER)
-        
-        # Create shader program
-        self.shader_program = glCreateProgram()
-        glAttachShader(self.shader_program, vertex_shader)
-        glAttachShader(self.shader_program, fragment_shader)
-        glLinkProgram(self.shader_program)
-        
-        if not glGetProgramiv(self.shader_program, GL_LINK_STATUS):
-            error = glGetProgramInfoLog(self.shader_program).decode()
-            raise RuntimeError(f"Program linking failed: {error}")
-        
-        # Clean up shaders
-        glDeleteShader(vertex_shader)
-        glDeleteShader(fragment_shader)
-        
-        # No uniforms needed for pre-transformed vertices
-    
     
     def _setup_instanced_shaders(self):
         """Create and compile instanced rendering shaders"""
@@ -452,30 +389,6 @@ class PointRenderer:
         self.rotations = rotations.astype(np.float32)
         self.opacities = opacity.astype(np.float32)
         
-        
-        # Create initial interleaved vertex data (will be updated with transformed data)
-        vertex_data = np.zeros((len(positions), 6), dtype=np.float32)
-        vertex_data[:, :3] = positions
-        vertex_data[:, 3:6] = colors
-        vertex_data = vertex_data.flatten()
-        
-        # Create VAO and VBO
-        self.vao = glGenVertexArrays(1)
-        self.vbo = glGenBuffers(1)
-        
-        glBindVertexArray(self.vao)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)  # Dynamic for updates
-        
-        # Position attribute
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, None)
-        glEnableVertexAttribArray(0)
-        
-        # Color attribute
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))
-        glEnableVertexAttribArray(1)
-        
-        glBindVertexArray(0)
     
     def _create_naive_gaussians(self):
         """Create hardcoded Gaussians matching the working method's naive_gaussian() function"""
@@ -522,35 +435,9 @@ class PointRenderer:
         
         # Opacity: all fully opaque
         self.opacities = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
-        
-        # Create initial interleaved vertex data for OpenGL
-        vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
-        vertex_data[:, :3] = self.original_positions
-        vertex_data[:, 3:6] = self.colors
-        vertex_data = vertex_data.flatten()
-        
-        # Create VAO and VBO
-        self.vao = glGenVertexArrays(1)
-        self.vbo = glGenBuffers(1)
-        
-        glBindVertexArray(self.vao)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
-        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)
-        
-        # Position attribute
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, None)
-        glEnableVertexAttribArray(0)
-        
-        # Color attribute
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))
-        glEnableVertexAttribArray(1)
-        
-        glBindVertexArray(0)
     
     def render(self, mv_matrix, p_matrix):
         """Render the points with given MV and P matrices using CuPy GPU transformation"""
-        if not self.shader_program or not self.vao:
-            return
         
         # Transform points using Python implementation (two-stage transformation)
         # Add homogeneous coordinate (w=1) to all points
@@ -755,10 +642,6 @@ class PointRenderer:
     
     def cleanup(self):
         """Clean up OpenGL resources"""
-        if self.vao:
-            glDeleteVertexArrays(1, [self.vao])
-        if self.vbo:
-            glDeleteBuffers(1, [self.vbo])
         if self.instance_vbo:
             glDeleteBuffers(1, [self.instance_vbo])
         if self.base_quad_vbo:
@@ -767,7 +650,5 @@ class PointRenderer:
             glDeleteBuffers(1, [self.base_quad_ibo])
         if self.instanced_vao:
             glDeleteVertexArrays(1, [self.instanced_vao])
-        if self.shader_program:
-            glDeleteProgram(self.shader_program)
         if self.instanced_shader_program:
             glDeleteProgram(self.instanced_shader_program)
