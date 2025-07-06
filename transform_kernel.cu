@@ -166,14 +166,10 @@ void compute_2d_covariance(const float* view_space_positions,    // View space p
     float cov3d_22 = rs31*r31 + rs32*r32 + rs33*r33;
     
     // Following working shader approach: compute T = W * J, then cov2D = T^T * transpose(cov3D) * T
-    // Extract W = transpose(mat3(viewmatrix)) - this gives view-to-world rotation
-    // Original view matrix 3x3 rotation part:
-    // [mv[0] mv[1] mv[2]]     After transpose:   [mv[0] mv[4] mv[8]]
-    // [mv[4] mv[5] mv[6]]  -> W =               [mv[1] mv[5] mv[9]]
-    // [mv[8] mv[9] mv[10]]                      [mv[2] mv[6] mv[10]]
-    float w00 = mv_matrix[0], w01 = mv_matrix[4], w02 = mv_matrix[8];
-    float w10 = mv_matrix[1], w11 = mv_matrix[5], w12 = mv_matrix[9];
-    float w20 = mv_matrix[2], w21 = mv_matrix[6], w22 = mv_matrix[10];
+    // Extract the 3x3 rotation part of the model-view matrix (upper-left 3x3)
+    float w00 = mv_matrix[0], w01 = mv_matrix[1], w02 = mv_matrix[2];
+    float w10 = mv_matrix[4], w11 = mv_matrix[5], w12 = mv_matrix[6];
+    float w20 = mv_matrix[8], w21 = mv_matrix[9], w22 = mv_matrix[10];
     
     // Extract focal length scaling from projection matrix
     float fx = proj_matrix[0];   // P[0,0] = focal_x / aspect  
