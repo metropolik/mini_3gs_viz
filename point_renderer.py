@@ -605,41 +605,30 @@ class PointRenderer:
         viewport_height = float(viewport[3])
         
         
-        # Generate instance data in working method format
+        # Generate instance data using vectorized numpy operations
         # Layout: center(3) + color(3) + scale+opacity(4) + rotation(4) = 14 floats per instance
+        
+        # Get sorted indices as numpy array once
+        sorted_indices_np = cp.asnumpy(sorted_indices)
+        
+        # Create instance data using vectorized operations
         instance_data = np.zeros((self.num_points, 14), dtype=np.float32)
+        instance_data[:, 0:3] = self.original_positions[sorted_indices_np]    # Position
+        instance_data[:, 3:6] = self.colors[sorted_indices_np]               # Color
+        instance_data[:, 6:9] = self.scales[sorted_indices_np]               # Scale  
+        instance_data[:, 9] = self.opacities[sorted_indices_np]              # Opacity
+        instance_data[:, 10:14] = self.rotations[sorted_indices_np]          # Rotation
         
-        # Get sorted data
-        view_space_sorted_np = cp.asnumpy(gpu_view_space_sorted)
-        colors_sorted_np = cp.asnumpy(gpu_colors_sorted)
-        scales_sorted_np = cp.asnumpy(gpu_scales_sorted)
-        rotations_sorted_np = cp.asnumpy(gpu_rotations_sorted)
-        opacities_sorted_np = cp.asnumpy(gpu_opacities_sorted)
-        
-        for i in range(self.num_points):
-            # Use original positions in SORTED order
-            idx = cp.asnumpy(sorted_indices)[i]
-            instance_data[i, 0:3] = self.original_positions[idx]      # 3D position
-            instance_data[i, 3:6] = self.colors[idx]                  # Color 
-            instance_data[i, 6:9] = self.scales[idx]                  # Scale
-            instance_data[i, 9] = self.opacities[idx]                 # Opacity
-            instance_data[i, 10:14] = self.rotations[idx]             # Rotation
-        
-        gpu_instance_data = cp.asarray(instance_data)
-        
-        
-        
-        
-        # Create instance VBO if not already done (Step 3)
+        # Create instance VBO if not already done
         if self.instance_vbo is None:
             self.instance_vbo = glGenBuffers(1)
         
-        # Update instance buffer with all instance data (no visibility check for performance)
-        instance_data = cp.asnumpy(gpu_instance_data).flatten()
+        # Flatten for OpenGL buffer
+        instance_data_flat = instance_data.flatten()
         
         
         glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
-        glBufferData(GL_ARRAY_BUFFER, instance_data.nbytes, instance_data, GL_DYNAMIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, instance_data_flat.nbytes, instance_data_flat, GL_DYNAMIC_DRAW)
         
         # Set up instanced rendering if not done
         if self.instanced_vao is None:
