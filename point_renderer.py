@@ -581,10 +581,28 @@ class PointRenderer:
         viewport_width = float(viewport[2])
         viewport_height = float(viewport[3])
         
-        self.covariance_kernel((grid_size,), (block_size,), 
-                             (gpu_view_space_sorted, gpu_scales_sorted, gpu_rotations_sorted,
-                              gpu_mv, gpu_p, gpu_cov2d, gpu_quad_params, gpu_visibility_mask,
-                              viewport_width, viewport_height, self.num_points))
+        # Use Python implementation instead of CUDA kernel
+        cov2d = np.zeros((self.num_points, 3), dtype=np.float32)
+        quad_params = np.zeros((self.num_points, 5), dtype=np.float32)
+        visibility_mask = np.zeros(self.num_points, dtype=np.int32)
+        
+        view_space_sorted_np = cp.asnumpy(gpu_view_space_sorted)
+        scales_sorted_np = cp.asnumpy(gpu_scales_sorted)
+        rotations_sorted_np = cp.asnumpy(gpu_rotations_sorted)
+        
+        transform.compute_2d_covariance(view_space_sorted_np.reshape(-1),
+                                      scales_sorted_np.reshape(-1),
+                                      rotations_sorted_np.reshape(-1),
+                                      mv_matrix.reshape(-1).astype(np.float32),
+                                      p_matrix.reshape(-1).astype(np.float32),
+                                      cov2d.reshape(-1),
+                                      quad_params.reshape(-1),
+                                      visibility_mask.reshape(-1),
+                                      viewport_width, viewport_height, self.num_points)
+        
+        gpu_cov2d = cp.asarray(cov2d)
+        gpu_quad_params = cp.asarray(quad_params)
+        gpu_visibility_mask = cp.asarray(visibility_mask)
         
         # Skip quad generation when using instanced rendering
         visible_count = self.num_points  # All quads are visible
