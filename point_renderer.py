@@ -557,11 +557,6 @@ class PointRenderer:
         homogeneous_positions = np.ones((self.num_points, 4), dtype=np.float32)
         homogeneous_positions[:, :3] = self.original_positions
         
-        # Transfer data to GPU
-        gpu_homogeneous = cp.asarray(homogeneous_positions)
-        gpu_mv = cp.asarray(mv_matrix.astype(np.float32))
-        gpu_p = cp.asarray(p_matrix.astype(np.float32))
-        
         # Use Python implementation instead of CUDA kernel for first transformation
         # First transformation: Apply Model-View matrix (keep homogeneous coordinates)
         view_space = np.zeros((self.num_points, 4), dtype=np.float32)
@@ -574,30 +569,10 @@ class PointRenderer:
         # Convert back to GPU for the remaining operations
         gpu_view_space = cp.asarray(view_space)
         
-        # Set up CUDA grid parameters for remaining kernels
-        block_size = 256
-        grid_size = (self.num_points + block_size - 1) // block_size
-        
         # Sort points by depth (z-coordinate in view space, farthest to closest for proper blending)
         view_z = gpu_view_space[:, 2]  # Extract z-coordinates in view space
         # Only sort points that are in front of the camera (z < 0)
         sorted_indices = cp.argsort(view_z)  # Sort by z (closest to farthest, then we'll reverse for visible ones)
-        
-        # Apply sorting to view space coordinates
-        gpu_view_space_sorted = gpu_view_space[sorted_indices]
-        
-        # Apply sorting to all Gaussian attributes on GPU
-        gpu_colors = cp.asarray(self.colors)
-        gpu_colors_sorted = gpu_colors[sorted_indices]
-        
-        gpu_scales = cp.asarray(self.scales)
-        gpu_scales_sorted = gpu_scales[sorted_indices]
-        
-        gpu_rotations = cp.asarray(self.rotations)
-        gpu_rotations_sorted = gpu_rotations[sorted_indices]
-        
-        gpu_opacities = cp.asarray(self.opacities)
-        gpu_opacities_sorted = gpu_opacities[sorted_indices]
         
         # Get viewport dimensions for rendering
         viewport = glGetIntegerv(GL_VIEWPORT)
