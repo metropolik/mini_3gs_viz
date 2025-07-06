@@ -154,11 +154,16 @@ def create_shader_program(vertex_source, fragment_source):
 def main():
     # Parse command line arguments
     ply_path = None
+    
     if len(sys.argv) > 1:
         ply_path = sys.argv[1]
         if not os.path.exists(ply_path):
             print(f"Error: PLY file '{ply_path}' not found")
             return
+    
+    print(f"Usage: python fpc.py [ply_file]")
+    print(f"Current: ply_file='{ply_path}'")
+    print()
     
     # Initialize GLFW
     if not glfw.init():

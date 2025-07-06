@@ -15,7 +15,11 @@ except ImportError:
 
 class PointRenderer:
     def __init__(self, ply_path=None):
-        """Initialize point renderer with optional PLY file"""
+        """Initialize point renderer with optional PLY file
+        
+        Args:
+            ply_path: Path to PLY file
+        """
         self.ply_path = ply_path
         
         
@@ -358,6 +362,13 @@ class PointRenderer:
             rotations = np.squeeze(rotations)
             if rotations.ndim == 3 and rotations.shape[1] == 1:
                 rotations = rotations.squeeze(1)
+            
+            # Fix quaternion coordinate system to match working method
+            # Apply the correct transformation: negate w and x components
+            rotations[:, 0] = -rotations[:, 0]  # negate w
+            rotations[:, 1] = -rotations[:, 1]  # negate x
+            print("Applied quaternion fix: negating w+x components")
+            
             # Normalize quaternions to ensure they are unit quaternions
             norms = np.linalg.norm(rotations, axis=1, keepdims=True)
             rotations = rotations / norms
