@@ -597,9 +597,15 @@ class PointRenderer:
                                        gpu_instance_data, self.num_points))
         
         # Second transformation: Apply Projection matrix with perspective division (for point centers - for debugging)
-        gpu_transformed_positions = cp.zeros((self.num_points, 3), dtype=cp.float32)
-        self.transform_perspective_kernel((grid_size,), (block_size,), 
-                                        (gpu_p, gpu_view_space_sorted, gpu_transformed_positions, self.num_points))
+        # Use Python implementation instead of CUDA kernel
+        transformed_positions = np.zeros((self.num_points, 3), dtype=np.float32)
+        transformed_positions_flat = transformed_positions.reshape(-1)
+        view_space_sorted_np = cp.asnumpy(gpu_view_space_sorted)
+        transform.transform_points_with_perspective(p_matrix.flatten().astype(np.float32),
+                                                  view_space_sorted_np.flatten(),
+                                                  transformed_positions_flat,
+                                                  self.num_points)
+        gpu_transformed_positions = cp.asarray(transformed_positions)
         
         # No need to transfer quad data when using instanced rendering
         
