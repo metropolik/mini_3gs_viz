@@ -196,7 +196,7 @@ class PointRenderer:
         else:
             raise RuntimeError("CuPy is required for the custom transform kernel")
         
-        # Initialize if PLY file is provided
+        # Initialize if PLY file is provided, otherwise use hardcoded Gaussians
         if ply_path and os.path.exists(ply_path):
             self._setup_shaders()
             self._setup_instanced_shaders()
@@ -204,7 +204,19 @@ class PointRenderer:
             # Enable point size control
             glEnable(GL_PROGRAM_POINT_SIZE)
         elif ply_path:
-            print(f"PLY file '{ply_path}' not found, point rendering disabled")
+            print(f"PLY file '{ply_path}' not found, using hardcoded Gaussians for idle visualization")
+            self._setup_shaders()
+            self._setup_instanced_shaders()
+            self._create_naive_gaussians()
+            # Enable point size control
+            glEnable(GL_PROGRAM_POINT_SIZE)
+        else:
+            print("No PLY file provided, using hardcoded Gaussians for idle visualization")
+            self._setup_shaders()
+            self._setup_instanced_shaders()
+            self._create_naive_gaussians()
+            # Enable point size control
+            glEnable(GL_PROGRAM_POINT_SIZE)
     
     def _compile_shader(self, source, shader_type):
         """Compile a shader from source"""
@@ -425,6 +437,76 @@ class PointRenderer:
         glBindVertexArray(self.vao)
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
         glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)  # Dynamic for updates
+        
+        # Position attribute
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, None)
+        glEnableVertexAttribArray(0)
+        
+        # Color attribute
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * 4, ctypes.c_void_p(3 * 4))
+        glEnableVertexAttribArray(1)
+        
+        glBindVertexArray(0)
+    
+    def _create_naive_gaussians(self):
+        """Create hardcoded Gaussians matching the working method's naive_gaussian() function"""
+        print("Creating naive hardcoded Gaussians for idle visualization")
+        
+        # Exactly matching working_method/util_gau.py naive_gaussian() function
+        self.num_points = 4
+        
+        # Positions (xyz): origin, and three axis-aligned positions
+        self.original_positions = np.array([
+            [0.0, 0.0, 0.0],  # Origin
+            [1.0, 0.0, 0.0],  # X-axis
+            [0.0, 1.0, 0.0],  # Y-axis  
+            [0.0, 0.0, 1.0]   # Z-axis
+        ], dtype=np.float32)
+        
+        # Rotation quaternions (w, x, y, z): all identity rotations
+        self.rotations = np.array([
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0]
+        ], dtype=np.float32)
+        
+        # Scale vectors: small default with axis-aligned stretching
+        self.scales = np.array([
+            [0.03, 0.03, 0.03],  # Small sphere
+            [0.2, 0.03, 0.03],   # Stretched along X
+            [0.03, 0.2, 0.03],   # Stretched along Y
+            [0.03, 0.03, 0.2]    # Stretched along Z
+        ], dtype=np.float32)
+        
+        # Colors (spherical harmonics DC term, converted to RGB)
+        # Original working method colors: [1,0,1], [1,0,0], [0,1,0], [0,0,1]
+        gau_c = np.array([
+            [1.0, 0.0, 1.0],  # Magenta
+            [1.0, 0.0, 0.0],  # Red
+            [0.0, 1.0, 0.0],  # Green
+            [0.0, 0.0, 1.0]   # Blue
+        ], dtype=np.float32)
+        # Convert from SH DC term: (color - 0.5) / 0.28209 -> color
+        # So we reverse: color * 0.28209 + 0.5
+        self.colors = gau_c * 0.28209479177387814 + 0.5
+        
+        # Opacity: all fully opaque
+        self.opacities = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+        
+        # Create initial interleaved vertex data for OpenGL
+        vertex_data = np.zeros((self.num_points, 6), dtype=np.float32)
+        vertex_data[:, :3] = self.original_positions
+        vertex_data[:, 3:6] = self.colors
+        vertex_data = vertex_data.flatten()
+        
+        # Create VAO and VBO
+        self.vao = glGenVertexArrays(1)
+        self.vbo = glGenBuffers(1)
+        
+        glBindVertexArray(self.vao)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
+        glBufferData(GL_ARRAY_BUFFER, vertex_data.nbytes, vertex_data, GL_DYNAMIC_DRAW)
         
         # Position attribute
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * 4, None)

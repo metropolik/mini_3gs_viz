@@ -1,1 +1,2 @@
 - Never try to execute fpc.py yourself. You are being run in wsl but I'm executing this in windows. So you can't reach it and will find wrong errors, that arent errors.
+- Do not hallucinate. If I'm asking you to do something where there is information missing, just get back to me and inform me about this. Do not start to make huge assumptions. E.g., Use method of file x to do y. If file x does not exist, just tell me about it. The same goes for any operation even in the same file. I make mistakes too and you should just tell me
