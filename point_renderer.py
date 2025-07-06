@@ -599,41 +599,11 @@ class PointRenderer:
         gpu_opacities = cp.asarray(self.opacities)
         gpu_opacities_sorted = gpu_opacities[sorted_indices]
         
-        # Compute 2D covariance matrices and quad parameters
-        gpu_cov2d = cp.zeros((self.num_points, 3), dtype=cp.float32)  # Upper triangle of 2x2 matrix
-        gpu_quad_params = cp.zeros((self.num_points, 5), dtype=cp.float32)  # center_x, center_y, radius_x, radius_y, ndc_z
-        gpu_visibility_mask = cp.zeros(self.num_points, dtype=cp.int32)
-        
-        # Get viewport dimensions for NDC conversion
+        # Get viewport dimensions for rendering
         viewport = glGetIntegerv(GL_VIEWPORT)
         viewport_width = float(viewport[2])
         viewport_height = float(viewport[3])
         
-        # Use Python implementation instead of CUDA kernel
-        cov2d = np.zeros((self.num_points, 3), dtype=np.float32)
-        quad_params = np.zeros((self.num_points, 5), dtype=np.float32)
-        visibility_mask = np.zeros(self.num_points, dtype=np.int32)
-        
-        view_space_sorted_np = cp.asnumpy(gpu_view_space_sorted)
-        scales_sorted_np = cp.asnumpy(gpu_scales_sorted)
-        rotations_sorted_np = cp.asnumpy(gpu_rotations_sorted)
-        
-        transform.compute_2d_covariance(view_space_sorted_np.reshape(-1),
-                                      scales_sorted_np.reshape(-1),
-                                      rotations_sorted_np.reshape(-1),
-                                      mv_matrix.reshape(-1).astype(np.float32),
-                                      p_matrix.reshape(-1).astype(np.float32),
-                                      cov2d.reshape(-1),
-                                      quad_params.reshape(-1),
-                                      visibility_mask.reshape(-1),
-                                      viewport_width, viewport_height, self.num_points)
-        
-        gpu_cov2d = cp.asarray(cov2d)
-        gpu_quad_params = cp.asarray(quad_params)
-        gpu_visibility_mask = cp.asarray(visibility_mask)
-        
-        # Skip quad generation when using instanced rendering
-        visible_count = self.num_points  # All quads are visible
         
         # Generate instance data in working method format
         # Layout: center(3) + color(3) + scale+opacity(4) + rotation(4) = 14 floats per instance
@@ -657,18 +627,6 @@ class PointRenderer:
         
         gpu_instance_data = cp.asarray(instance_data)
         
-        # Second transformation: Apply Projection matrix with perspective division (for point centers - for debugging)
-        # Use Python implementation instead of CUDA kernel
-        transformed_positions = np.zeros((self.num_points, 3), dtype=np.float32)
-        transformed_positions_flat = transformed_positions.reshape(-1)
-        view_space_sorted_np = cp.asnumpy(gpu_view_space_sorted)
-        transform.transform_points_with_perspective(p_matrix.flatten().astype(np.float32),
-                                                  view_space_sorted_np.flatten(),
-                                                  transformed_positions_flat,
-                                                  self.num_points)
-        gpu_transformed_positions = cp.asarray(transformed_positions)
-        
-        # No need to transfer quad data when using instanced rendering
         
         
         
