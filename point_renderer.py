@@ -645,16 +645,16 @@ class PointRenderer:
             
         print("Setting up instanced rendering...")
         
-        # Create base quad vertices (2D positions)
+        # Create base quad vertices (2D positions) - match working method order
         base_quad = np.array([
-            [-1.0, -1.0],  # Bottom-left
-            [ 1.0, -1.0],  # Bottom-right
-            [-1.0,  1.0],  # Top-left
-            [ 1.0,  1.0],  # Top-right
+            [-1.0,  1.0],  # Top-left     (vertex 0)
+            [ 1.0,  1.0],  # Top-right    (vertex 1) 
+            [ 1.0, -1.0],  # Bottom-right (vertex 2)
+            [-1.0, -1.0],  # Bottom-left  (vertex 3)
         ], dtype=np.float32).flatten()
         
-        # Create indices for two triangles
-        indices = np.array([0, 1, 2, 1, 3, 2], dtype=np.uint32)
+        # Create indices for two triangles - match working method order
+        indices = np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32)
         
         # Create VAO and VBOs
         self.instanced_vao = glGenVertexArrays(1)
