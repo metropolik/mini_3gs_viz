@@ -47,25 +47,36 @@ class PointRenderer:
         self.gaussian_fragment_shader_source = """
         #version 330 core
         in vec3 fragColor;
-        in vec2 coordxy;   // Local coordinate in quad 
-        in vec3 conic;     // Conic coefficients for Gaussian evaluation
-        in float opacity;  // Opacity value
-        in vec2 quadSize;  // Quad dimensions for falloff scaling
+        in vec2 fragUV;
+        in vec4 quadData;  // opacity, inv_cov_00, inv_cov_01, inv_cov_11
+        in vec2 quadRadii; // radius_x, radius_y (NDC extents)
+        in vec2 gaussianCenter; // Gaussian center in NDC space
         
         out vec4 FragColor;
         
+        uniform vec2 viewport;  // Viewport dimensions (width, height)
         uniform int render_mod;  // Render mode: 0=gaussian, -3=flat ball, -4=gaussian ball
         
         void main()
         {
-            // Use variable sigma based on actual quad size
-            // quadSize contains the half-width and half-height in pixels
-            // For elliptical Gaussians, use average sigma for now
-            float avg_radius = (quadSize.x + quadSize.y) * 0.5;
-            float sigma_pixels = avg_radius / 3.0;  // 3-sigma = radius
+            float opacity = quadData.x;
+            float inv_cov_00 = quadData.y;
+            float inv_cov_01 = quadData.z;
+            float inv_cov_11 = quadData.w;
             
-            float dist_squared = dot(coordxy, coordxy);
-            float alpha = opacity * exp(-0.5 * dist_squared / (sigma_pixels * sigma_pixels));
+            // Convert gl_FragCoord from pixel coordinates to NDC
+            vec2 fragNDC = (gl_FragCoord.xy / viewport) * 2.0 - 1.0;
+            
+            // Calculate distance from fragment to Gaussian center in NDC space
+            vec2 d = fragNDC - gaussianCenter;
+            
+            // Evaluate Gaussian function
+            float exponent = -0.5 * (d.x * d.x * inv_cov_00 + 
+                                    2.0 * d.x * d.y * inv_cov_01 + 
+                                    d.y * d.y * inv_cov_11);
+            
+            exponent = max(exponent, -10.0);
+            float alpha = opacity * exp(exponent);
             alpha = clamp(alpha, 0.0, 1.0);
             
             // Handle rendering modes
@@ -73,8 +84,7 @@ class PointRenderer:
                 alpha = alpha > 0.22 ? 1.0 : 0.0;
             } else if (render_mod == -4) {  // Gaussian Ball
                 alpha = alpha > 0.22 ? 1.0 : 0.0;
-                float power = -0.5 * dist_squared / (sigma_pixels * sigma_pixels);
-                FragColor = vec4(fragColor * exp(power), alpha);
+                FragColor = vec4(fragColor * exp(exponent), alpha);
                 return;
             }
             
@@ -94,54 +104,64 @@ class PointRenderer:
         layout (location = 3) in vec4 aInstanceCovariance; // opacity, inv_cov_00, inv_cov_01, inv_cov_11
         
         out vec3 fragColor;
-        out vec2 coordxy;    // Local coordinate in quad (pixels from center)
-        out vec3 conic;      // Conic coefficients for Gaussian evaluation
-        out float opacity;   // Opacity value
-        out vec2 quadSize;   // Quad dimensions for falloff scaling
-        
-        uniform vec2 viewport;  // Viewport dimensions (width, height)
+        out vec2 gaussianCenter;
+        out vec4 quadData;
         
         void main()
         {
-            // Extract data
-            float inst_opacity = aInstanceCovariance.x;
+            // Extract inverse covariance matrix
             float inv_cov_00 = aInstanceCovariance.y;
             float inv_cov_01 = aInstanceCovariance.z;
             float inv_cov_11 = aInstanceCovariance.w;
             
-            
-            // Compute covariance matrix from inverse covariance
+            // Compute covariance matrix from inverse (for sizing)
             float det_inv = inv_cov_00 * inv_cov_11 - inv_cov_01 * inv_cov_01;
-            if (abs(det_inv) < 1e-6) det_inv = 1e-6;
+            if (abs(det_inv) < 1e-6) det_inv = 1e-6; // Avoid division by zero
             
-            float cov2d_x = inv_cov_11 / det_inv;  // cov2d.x in working method
-            float cov2d_y = -inv_cov_01 / det_inv; // cov2d.y in working method
-            float cov2d_z = inv_cov_00 / det_inv;  // cov2d.z in working method
+            float cov_00 = inv_cov_11 / det_inv;
+            float cov_01 = -inv_cov_01 / det_inv;
+            float cov_11 = inv_cov_00 / det_inv;
             
-            // Compute screen-space quad half-dimensions from 2D covariance like working method
-            // quadwh_scr = vec2(3.0 * sqrt(cov2d.x), 3.0 * sqrt(cov2d.z))
-            vec2 quadwh_scr = vec2(3.0 * sqrt(max(cov2d_x, 1e-6)), 3.0 * sqrt(max(cov2d_z, 1e-6)));
+            // Compute eigenvalues for quad sizing
+            float trace = cov_00 + cov_11;
+            float det = cov_00 * cov_11 - cov_01 * cov_01;
+            float discriminant = trace * trace - 4.0 * det;
+            discriminant = max(discriminant, 0.0);
             
-            // Scale to reasonable pixel sizes (the covariance might be in different units)
-            quadwh_scr = quadwh_scr * 800.0;  // Scale factor to convert to reasonable pixel sizes
+            float sqrt_disc = sqrt(discriminant);
+            float lambda1 = 0.5 * (trace + sqrt_disc);
+            float lambda2 = 0.5 * (trace - sqrt_disc);
             
-            // Convert screen-space to NDC for quad positioning  
-            vec2 quadwh_ndc = quadwh_scr / viewport * 2.0;
+            // Compute radii (3 sigma bounds)
+            float radius_x = 3.0 * sqrt(max(lambda1, 1e-6));
+            float radius_y = 3.0 * sqrt(max(lambda2, 1e-6));
             
-            // Position the quad vertex in NDC space
+            // Compute eigenvector for orientation
+            vec2 evec;
+            if (abs(cov_01) > 1e-6) {
+                evec.x = lambda1 - cov_11;
+                evec.y = cov_01;
+                evec = normalize(evec);
+            } else {
+                evec = vec2(1.0, 0.0);
+            }
+            
+            // Create rotation matrix from eigenvector
+            mat2 rotation = mat2(evec.x, evec.y, -evec.y, evec.x);
+            
+            // Scale and rotate the base quad vertex
+            vec2 scaledVertex = aQuadVertex * vec2(radius_x, radius_y);
+            vec2 rotatedVertex = rotation * scaledVertex;
+            
             vec3 position;
-            position.xy = aInstanceCenter.xy + aQuadVertex * quadwh_ndc;
+            position.xy = aInstanceCenter.xy + rotatedVertex;
             position.z = aInstanceCenter.z;
             
             gl_Position = vec4(position, 1.0);
             
-            // DEBUG: Use simple coordinates and conic for now
-            coordxy = aQuadVertex * quadwh_scr;
-            conic = vec3(1.0, 0.0, 1.0);  // Simple identity-like conic
-            
             fragColor = aInstanceColor;
-            opacity = inst_opacity;
-            quadSize = quadwh_scr;
+            gaussianCenter = aInstanceCenter.xy;
+            quadData = aInstanceCovariance;
         }
         """
         
