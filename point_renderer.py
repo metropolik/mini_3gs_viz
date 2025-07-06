@@ -4,6 +4,7 @@ from math import sin, cos, radians
 import os
 import open3d as o3d
 import ctypes
+import transform
 try:
     import cupy as cp
     CUPY_AVAILABLE = True
@@ -533,14 +534,21 @@ class PointRenderer:
         gpu_mv = cp.asarray(mv_matrix.astype(np.float32))
         gpu_p = cp.asarray(p_matrix.astype(np.float32))
         
+        # Use Python implementation instead of CUDA kernel for first transformation
         # First transformation: Apply Model-View matrix (keep homogeneous coordinates)
-        gpu_view_space = cp.zeros((self.num_points, 4), dtype=cp.float32)  # Keep homogeneous for intermediate
+        view_space = np.zeros((self.num_points, 4), dtype=np.float32)
+        view_space_flat = view_space.reshape(-1)  # Use reshape instead of flatten for a view
+        transform.transform_points(mv_matrix.flatten().astype(np.float32), 
+                                 homogeneous_positions.flatten(), 
+                                 view_space_flat, 
+                                 self.num_points)
         
-        # Launch first transform kernel (MV transformation, no perspective division)
+        # Convert back to GPU for the remaining operations
+        gpu_view_space = cp.asarray(view_space)
+        
+        # Set up CUDA grid parameters for remaining kernels
         block_size = 256
         grid_size = (self.num_points + block_size - 1) // block_size
-        self.transform_kernel((grid_size,), (block_size,), 
-                            (gpu_mv, gpu_homogeneous, gpu_view_space, self.num_points))
         
         # Sort points by depth (z-coordinate in view space, farthest to closest for proper blending)
         view_z = gpu_view_space[:, 2]  # Extract z-coordinates in view space
