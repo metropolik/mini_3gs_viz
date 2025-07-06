@@ -634,45 +634,6 @@ class PointRenderer:
         # Update instance buffer with all instance data (no visibility check for performance)
         instance_data = cp.asnumpy(gpu_instance_data).flatten()
         
-        # Debug: Print first few gaussian centers and covariance values
-        print(f"Debug: First 3 gaussians:")
-        cov2d_np = cp.asnumpy(gpu_cov2d)
-        for i in range(min(3, self.num_points)):
-            center_x = instance_data[i * 10 + 0]
-            center_y = instance_data[i * 10 + 1] 
-            center_z = instance_data[i * 10 + 2]
-            r = instance_data[i * 10 + 3]
-            g = instance_data[i * 10 + 4]
-            b = instance_data[i * 10 + 5]
-            opacity = instance_data[i * 10 + 6]
-            inv_cov_00 = instance_data[i * 10 + 7]
-            inv_cov_01 = instance_data[i * 10 + 8]
-            inv_cov_11 = instance_data[i * 10 + 9]
-            
-            # Also show 2D covariance values
-            cov2d_00 = cov2d_np[i, 0]
-            cov2d_01 = cov2d_np[i, 1] 
-            cov2d_11 = cov2d_np[i, 2]
-            
-            print(f"  Gaussian {i}: center=({center_x:.4f}, {center_y:.4f}, {center_z:.4f})")
-            print(f"    color=({r:.4f}, {g:.4f}, {b:.4f}), opacity={opacity:.4f}")
-            print(f"    2D cov=({cov2d_00:.6f}, {cov2d_01:.6f}, {cov2d_11:.6f})")
-            print(f"    inv_cov=({inv_cov_00:.4f}, {inv_cov_01:.4f}, {inv_cov_11:.4f})")
-            
-            # Calculate what the working method would use for quad size
-            working_quad_w = 3.0 * np.sqrt(max(cov2d_00, 1e-6))
-            working_quad_h = 3.0 * np.sqrt(max(cov2d_11, 1e-6))
-            print(f"    working method quad size: w={working_quad_w:.6f}, h={working_quad_h:.6f}")
-            
-            # Show what our NDC conversion gives us
-            our_ndc_w = working_quad_w / (viewport_width * 0.5)
-            our_ndc_h = working_quad_h / (viewport_height * 0.5)
-            print(f"    our NDC conversion: w={our_ndc_w:.8f}, h={our_ndc_h:.8f}")
-            print(f"    viewport: {viewport_width}x{viewport_height}")
-            
-            # Check if off-diagonal covariance is significant (indicates rotation)
-            if abs(cov2d_01) > 1e-8:
-                print(f"    WARNING: non-zero off-diagonal cov2d_01={cov2d_01:.8f} - this causes rotation!")
         
         glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
         glBufferData(GL_ARRAY_BUFFER, instance_data.nbytes, instance_data, GL_DYNAMIC_DRAW)

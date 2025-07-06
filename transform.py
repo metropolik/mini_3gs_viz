@@ -158,13 +158,26 @@ def compute_2d_covariance(view_space_positions, scales, rotations, mv_matrix, pr
         w10 = mv_matrix[4]; w11 = mv_matrix[5]; w12 = mv_matrix[6]
         w20 = mv_matrix[8]; w21 = mv_matrix[9]; w22 = mv_matrix[10]
         
-        # Extract focal length scaling from projection matrix
-        fx = proj_matrix[0]   # P[0,0] = focal_x / aspect  
-        fy = proj_matrix[5]   # P[1,1] = focal_y
+        # Extract proper camera intrinsics like working method
+        # Working method uses: computeCov2D(pos, focal_x, focal_y, tan_fovx, tan_fovy, cov3d, view)
         
-        # Apply viewport clamping
-        tan_fovx = 1.0 / fx  # tan(fov_x/2)
-        tan_fovy = 1.0 / fy  # tan(fov_y/2)
+        # From our camera setup: FOV=45°, aspect=width/height
+        fovy_radians = math.radians(45.0)
+        aspect_ratio = viewport_width / viewport_height
+        
+        # Calculate half-FOV tangents (hfovxy_focal.xy equivalent)
+        tan_half_fovy = math.tan(fovy_radians * 0.5)
+        tan_half_fovx = tan_half_fovy * aspect_ratio
+        
+        # Calculate focal lengths (hfovxy_focal.z equivalent)
+        focal_y = 1.0 / tan_half_fovy
+        focal_x = focal_y / aspect_ratio
+        
+        # Use the working method's values directly
+        tan_fovx = tan_half_fovx
+        tan_fovy = tan_half_fovy
+        fx = focal_x  
+        fy = focal_y
         limx = 1.3 * tan_fovx
         limy = 1.3 * tan_fovy
         
