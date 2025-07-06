@@ -353,8 +353,8 @@ class PointRenderer:
             rot_1 = pcd_t.point['rot_1'].numpy()
             rot_2 = pcd_t.point['rot_2'].numpy()
             rot_3 = pcd_t.point['rot_3'].numpy()
-            # Note: PLY stores as (x,y,z,w) in rot_0-3, but we need (w,x,y,z) for the kernel
-            rotations = np.stack([rot_3, rot_0, rot_1, rot_2], axis=-1)  # Reorder to (w,x,y,z)
+            # PLY stores as (w,x,y,z) in rot_0-3, use directly like working method
+            rotations = np.stack([rot_0, rot_1, rot_2, rot_3], axis=-1)  # Direct order (w,x,y,z)
             rotations = np.squeeze(rotations)
             if rotations.ndim == 3 and rotations.shape[1] == 1:
                 rotations = rotations.squeeze(1)
