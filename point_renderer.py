@@ -45,127 +45,164 @@ class PointRenderer:
         }
         """
         
-        # Fragment shader for Gaussian evaluation
+        # Copy working method's fragment shader exactly
         self.gaussian_fragment_shader_source = """
-        #version 330 core
-        in vec3 fragColor;
-        in vec2 fragUV;
-        in vec4 quadData;  // opacity, inv_cov_00, inv_cov_01, inv_cov_11
-        in vec2 quadRadii; // radius_x, radius_y (NDC extents)
-        in vec2 gaussianCenter; // Gaussian center in NDC space
-        
+        #version 430 core
+
+        in vec3 color;
+        in float alpha;
+        in vec3 conic;
+        in vec2 coordxy;  // local coordinate in quad, unit in pixel
+
+        uniform int render_mod;  // > 0 render 0-ith SH dim, -1 depth, -2 bill board, -3 flat ball, -4 gaussian ball
+
         out vec4 FragColor;
-        
-        uniform vec2 viewport;  // Viewport dimensions (width, height)
-        uniform int render_mod;  // Render mode: 0=gaussian, -2=billboard, -3=flat ball, -4=gaussian ball
-        
+
         void main()
         {
-            // Handle billboard mode first (like working method)
-            if (render_mod == -2) {  // Billboard mode
-                FragColor = vec4(fragColor, 1.0);
+            if (render_mod == -2)
+            {
+                FragColor = vec4(color, 1.f);
                 return;
             }
-            
-            float opacity = quadData.x;
-            float inv_cov_00 = quadData.y;
-            float inv_cov_01 = quadData.z;
-            float inv_cov_11 = quadData.w;
-            
-            // Convert gl_FragCoord from pixel coordinates to NDC
-            vec2 fragNDC = (gl_FragCoord.xy / viewport) * 2.0 - 1.0;
-            
-            // Calculate distance from fragment to Gaussian center in NDC space
-            vec2 d = fragNDC - gaussianCenter;
-            
-            // Evaluate Gaussian function
-            float exponent = -0.5 * (d.x * d.x * inv_cov_00 + 
-                                    2.0 * d.x * d.y * inv_cov_01 + 
-                                    d.y * d.y * inv_cov_11);
-            
-            exponent = max(exponent, -10.0);
-            float alpha = opacity * exp(exponent);
-            alpha = clamp(alpha, 0.0, 1.0);
-            
-            // Handle rendering modes
-            if (render_mod == -3) {  // Flat Ball
-                alpha = alpha > 0.22 ? 1.0 : 0.0;
-            } else if (render_mod == -4) {  // Gaussian Ball
-                alpha = alpha > 0.22 ? 1.0 : 0.0;
-                FragColor = vec4(fragColor * exp(exponent), alpha);
-                return;
+
+            float power = -0.5f * (conic.x * coordxy.x * coordxy.x + conic.z * coordxy.y * coordxy.y) - conic.y * coordxy.x * coordxy.y;
+            if (power > 0.f)
+                discard;
+            float opacity = min(0.99f, alpha * exp(power));
+            if (opacity < 1.f / 255.f)
+                discard;
+            FragColor = vec4(color, opacity);
+
+            // handling special shading effect
+            if (render_mod == -3)
+                FragColor.a = FragColor.a > 0.22 ? 1 : 0;
+            else if (render_mod == -4)
+            {
+                FragColor.a = FragColor.a > 0.22 ? 1 : 0;
+                FragColor.rgb = FragColor.rgb * exp(power);
             }
-            
-            FragColor = vec4(fragColor, alpha);
         }
         """
         
-        # Instanced rendering shaders
+        # Copy working method's vertex shader and adapt for instanced rendering
         self.instanced_vertex_shader_source = """
-        #version 330 core
-        // Per-vertex attributes (base quad)
-        layout (location = 0) in vec2 aQuadVertex;  // Base quad vertex position (-1 to 1)
-        
-        // Per-instance attributes
+        #version 430 core
+
+        #define SH_C0 0.28209479177387814f
+
+        layout(location = 0) in vec2 position;
+
+        // Per-instance attributes  
         layout (location = 1) in vec3 aInstanceCenter;    // center_x, center_y, ndc_z
         layout (location = 2) in vec3 aInstanceColor;     // r, g, b
-        layout (location = 3) in vec4 aInstanceCovariance; // opacity, inv_cov_00, inv_cov_01, inv_cov_11
-        
-        out vec3 fragColor;
-        out vec2 gaussianCenter;
-        out vec4 quadData;
-        
-        uniform vec2 viewport;  // Viewport dimensions for NDC conversion
-        uniform float fovy;     // Field of view Y in radians
-        uniform float aspect;   // Aspect ratio (width/height)
-        
+        layout (location = 3) in vec4 aInstanceData;      // scale_x, scale_y, scale_z, opacity
+        layout (location = 4) in vec4 aInstanceRotation;  // quat: w, x, y, z
+
+        uniform mat4 view_matrix;
+        uniform mat4 projection_matrix;
+        uniform vec3 hfovxy_focal;
+        uniform vec3 cam_pos;
+        uniform float scale_modifier;
+        uniform int render_mod;
+
+        out vec3 color;
+        out float alpha;
+        out vec3 conic;
+        out vec2 coordxy;
+
+        mat3 computeCov3D(vec3 scale, vec4 q)
+        {
+            mat3 S = mat3(0.f);
+            S[0][0] = scale.x;
+            S[1][1] = scale.y;
+            S[2][2] = scale.z;
+            float r = q.x;
+            float x = q.y;
+            float y = q.z;
+            float z = q.w;
+
+            mat3 R = mat3(
+                1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
+                2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
+                2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
+            );
+
+            mat3 M = S * R;
+            mat3 Sigma = transpose(M) * M;
+            return Sigma;
+        }
+
+        vec3 computeCov2D(vec4 mean_view, float focal_x, float focal_y, float tan_fovx, float tan_fovy, mat3 cov3D, mat4 viewmatrix)
+        {
+            vec4 t = mean_view;
+            float limx = 1.3f * tan_fovx;
+            float limy = 1.3f * tan_fovy;
+            float txtz = t.x / t.z;
+            float tytz = t.y / t.z;
+            t.x = min(limx, max(-limx, txtz)) * t.z;
+            t.y = min(limy, max(-limy, tytz)) * t.z;
+
+            mat3 J = mat3(
+                focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
+                0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+                0, 0, 0
+            );
+            mat3 W = transpose(mat3(viewmatrix));
+            mat3 T = W * J;
+
+            mat3 cov = transpose(T) * transpose(cov3D) * T;
+            cov[0][0] += 0.3f;
+            cov[1][1] += 0.3f;
+            return vec3(cov[0][0], cov[0][1], cov[1][1]);
+        }
+
         void main()
         {
-            // Extract inverse covariance matrix
-            float inv_cov_00 = aInstanceCovariance.y;
-            float inv_cov_01 = aInstanceCovariance.z;
-            float inv_cov_11 = aInstanceCovariance.w;
+            // Use instance center as gaussian position
+            vec4 g_pos = vec4(aInstanceCenter, 1.f);
+            vec4 g_pos_view = view_matrix * g_pos;
+            vec4 g_pos_screen = projection_matrix * g_pos_view;
+            g_pos_screen.xyz = g_pos_screen.xyz / g_pos_screen.w;
+            g_pos_screen.w = 1.f;
             
-            // Convert inverse covariance back to 2D covariance (like working method)
-            float det_inv = inv_cov_00 * inv_cov_11 - inv_cov_01 * inv_cov_01;
-            if (abs(det_inv) < 1e-6) det_inv = 1e-6;
+            // Early culling
+            if (any(greaterThan(abs(g_pos_screen.xyz), vec3(1.3))))
+            {
+                gl_Position = vec4(-100, -100, -100, 1);
+                return;
+            }
             
-            float cov2d_00 = inv_cov_11 / det_inv;
-            float cov2d_11 = inv_cov_00 / det_inv;
+            vec4 g_rot = aInstanceRotation;
+            vec3 g_scale = aInstanceData.xyz;
+            float g_opacity = aInstanceData.w;
+
+            mat3 cov3d = computeCov3D(g_scale * scale_modifier, g_rot);
+            vec2 wh = 2 * hfovxy_focal.xy * hfovxy_focal.z;
+            vec3 cov2d = computeCov2D(g_pos_view, 
+                                      hfovxy_focal.z, 
+                                      hfovxy_focal.z, 
+                                      hfovxy_focal.x, 
+                                      hfovxy_focal.y, 
+                                      cov3d, 
+                                      view_matrix);
+
+            // Invert covariance (EWA algorithm)
+            float det = (cov2d.x * cov2d.z - cov2d.y * cov2d.y);
+            if (det == 0.0f)
+                gl_Position = vec4(0.f, 0.f, 0.f, 0.f);
             
-            // Use the working method approach: 3 * sqrt(cov2d diagonal elements)
-            vec2 quadwh_scr = vec2(3.0 * sqrt(max(cov2d_00, 1e-6)), 3.0 * sqrt(max(cov2d_11, 1e-6)));
+            float det_inv = 1.f / det;
+            conic = vec3(cov2d.z * det_inv, -cov2d.y * det_inv, cov2d.x * det_inv);
             
-            // Convert screen space dimensions to NDC space like working method
-            // Working method: quadwh_ndc = quadwh_scr / wh * 2
-            // where wh = 2 * hfovxy_focal.xy * hfovxy_focal.z
+            vec2 quadwh_scr = vec2(3.f * sqrt(cov2d.x), 3.f * sqrt(cov2d.z));
+            vec2 quadwh_ndc = quadwh_scr / wh * 2;
+            g_pos_screen.xy = g_pos_screen.xy + position * quadwh_ndc;
+            coordxy = position * quadwh_scr;
+            gl_Position = g_pos_screen;
             
-            // Derive equivalent values:
-            // tan(fovy/2) = half FOV tangent for Y
-            // tan(fovx/2) = tan(fovy/2) * aspect for X  
-            float tan_half_fovy = tan(fovy * 0.5);
-            float tan_half_fovx = tan_half_fovy * aspect;
-            
-            // Focal lengths (from projection matrix diagonal elements)
-            float focal_y = 1.0 / tan_half_fovy;
-            float focal_x = focal_y / aspect;
-            
-            // Working method's wh = 2 * [tan_half_fovx, tan_half_fovy] * focal
-            // Simplified: wh = 2 * [tan_half_fovx * focal_x, tan_half_fovy * focal_y] = [2, 2]
-            vec2 wh = 2.0 * vec2(tan_half_fovx * focal_x, tan_half_fovy * focal_y);
-            
-            vec2 quadwh_ndc = quadwh_scr / wh * 2.0;
-            
-            // Apply quad offset in NDC space without rotation
-            vec3 position;
-            position.xy = aInstanceCenter.xy + aQuadVertex * quadwh_ndc;
-            position.z = aInstanceCenter.z;
-            
-            gl_Position = vec4(position, 1.0);
-            
-            fragColor = aInstanceColor;
-            gaussianCenter = aInstanceCenter.xy;
-            quadData = aInstanceCovariance;
+            alpha = g_opacity;
+            color = aInstanceColor;
         }
         """
         
@@ -278,11 +315,13 @@ class PointRenderer:
         glDeleteShader(vertex_shader)
         glDeleteShader(fragment_shader)
         
-        # Get uniform locations
-        self.instanced_viewport_uniform = glGetUniformLocation(self.instanced_shader_program, "viewport")
+        # Get uniform locations (matching working method)
+        self.instanced_view_matrix_uniform = glGetUniformLocation(self.instanced_shader_program, "view_matrix")
+        self.instanced_projection_matrix_uniform = glGetUniformLocation(self.instanced_shader_program, "projection_matrix")
+        self.instanced_hfovxy_focal_uniform = glGetUniformLocation(self.instanced_shader_program, "hfovxy_focal")
+        self.instanced_cam_pos_uniform = glGetUniformLocation(self.instanced_shader_program, "cam_pos")
+        self.instanced_scale_modifier_uniform = glGetUniformLocation(self.instanced_shader_program, "scale_modifier")
         self.instanced_render_mod_uniform = glGetUniformLocation(self.instanced_shader_program, "render_mod")
-        self.instanced_fovy_uniform = glGetUniformLocation(self.instanced_shader_program, "fovy")
-        self.instanced_aspect_uniform = glGetUniformLocation(self.instanced_shader_program, "aspect")
     
     
     
@@ -596,19 +635,25 @@ class PointRenderer:
         # Skip quad generation when using instanced rendering
         visible_count = self.num_points  # All quads are visible
         
-        # Generate instance data for future instanced rendering (Step 3)
-        # Use Python implementation instead of CUDA kernel
-        instance_data = np.zeros((self.num_points, 10), dtype=np.float32)
+        # Generate instance data in working method format
+        # Layout: center(3) + color(3) + scale+opacity(4) + rotation(4) = 14 floats per instance
+        instance_data = np.zeros((self.num_points, 14), dtype=np.float32)
+        
+        # Get sorted data
+        view_space_sorted_np = cp.asnumpy(gpu_view_space_sorted)
         colors_sorted_np = cp.asnumpy(gpu_colors_sorted)
+        scales_sorted_np = cp.asnumpy(gpu_scales_sorted)
+        rotations_sorted_np = cp.asnumpy(gpu_rotations_sorted)
         opacities_sorted_np = cp.asnumpy(gpu_opacities_sorted)
         
-        transform.generate_instance_data(quad_params.reshape(-1),
-                                       cov2d.reshape(-1),
-                                       visibility_mask.reshape(-1),
-                                       colors_sorted_np.reshape(-1),
-                                       opacities_sorted_np.reshape(-1),
-                                       instance_data.reshape(-1),
-                                       self.num_points)
+        for i in range(self.num_points):
+            # Use original positions in SORTED order
+            idx = cp.asnumpy(sorted_indices)[i]
+            instance_data[i, 0:3] = self.original_positions[idx]      # 3D position
+            instance_data[i, 3:6] = self.colors[idx]                  # Color 
+            instance_data[i, 6:9] = self.scales[idx]                  # Scale
+            instance_data[i, 9] = self.opacities[idx]                 # Opacity
+            instance_data[i, 10:14] = self.rotations[idx]             # Rotation
         
         gpu_instance_data = cp.asarray(instance_data)
         
@@ -643,7 +688,7 @@ class PointRenderer:
             self._setup_instanced_rendering()
         
         # Render using instanced rendering
-        self._render_instanced(self.num_points, viewport_width, viewport_height)
+        self._render_instanced(self.num_points, viewport_width, viewport_height, mv_matrix, p_matrix)
     
     
     def _setup_instanced_rendering(self):
@@ -685,9 +730,9 @@ class PointRenderer:
         if self.instance_vbo is not None:
             glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
             
-            # Instance data layout: 10 floats per instance
-            # center_x, center_y, ndc_z, r, g, b, opacity, inv_cov_00, inv_cov_01, inv_cov_11
-            stride = 10 * 4  # 10 floats * 4 bytes
+            # Instance data layout: 14 floats per instance
+            # center(3) + color(3) + scale+opacity(4) + rotation(4)
+            stride = 14 * 4  # 14 floats * 4 bytes
             
             # Center position (location = 1)
             glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
@@ -699,16 +744,21 @@ class PointRenderer:
             glEnableVertexAttribArray(2)
             glVertexAttribDivisor(2, 1)  # One per instance
             
-            # Covariance data (location = 3)
+            # Scale + Opacity (location = 3)
             glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(6 * 4))
             glEnableVertexAttribArray(3)
             glVertexAttribDivisor(3, 1)  # One per instance
+            
+            # Rotation quaternion (location = 4)
+            glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(10 * 4))
+            glEnableVertexAttribArray(4)
+            glVertexAttribDivisor(4, 1)  # One per instance
         
         glBindVertexArray(0)
         print("Instanced rendering setup complete")
     
     
-    def _render_instanced(self, num_instances, viewport_width, viewport_height):
+    def _render_instanced(self, num_instances, viewport_width, viewport_height, mv_matrix, p_matrix):
         """Render using instanced rendering"""
         # Enable alpha blending
         glEnable(GL_BLEND)
@@ -722,11 +772,35 @@ class PointRenderer:
         # Use instanced shader program
         glUseProgram(self.instanced_shader_program)
         
-        # Set uniforms
-        glUniform2f(self.instanced_viewport_uniform, viewport_width, viewport_height)
+        # Calculate hfovxy_focal values to match working method
+        fovy_radians = math.radians(45.0)
+        aspect_ratio = viewport_width / viewport_height
+        tan_half_fovy = math.tan(fovy_radians * 0.5)
+        tan_half_fovx = tan_half_fovy * aspect_ratio
+        # Working method uses focal length in a different way
+        focal = viewport_height / (2.0 * tan_half_fovy)
+        hfovxy_focal = [tan_half_fovx, tan_half_fovy, focal]
+        
+        # Camera position (extract from view matrix)
+        view_inv = np.linalg.inv(mv_matrix)
+        cam_pos = view_inv[:3, 3]
+        
+        # Set uniforms (matching working method) - OpenGL expects column-major
+        glUniformMatrix4fv(self.instanced_view_matrix_uniform, 1, GL_FALSE, mv_matrix.T.flatten())
+        glUniformMatrix4fv(self.instanced_projection_matrix_uniform, 1, GL_FALSE, p_matrix.T.flatten())
+        glUniform3fv(self.instanced_hfovxy_focal_uniform, 1, hfovxy_focal)
+        glUniform3fv(self.instanced_cam_pos_uniform, 1, cam_pos)
+        
+        # Debug matrices (only occasionally)
+        import time
+        if not hasattr(self, '_last_debug_time'):
+            self._last_debug_time = 0
+        if time.time() - self._last_debug_time > 2.0:  # Every 2 seconds
+            print(f"Debug: Camera position: {cam_pos}, focal: {focal:.2f}")
+            self._last_debug_time = time.time()
+        
+        glUniform1f(self.instanced_scale_modifier_uniform, 1.0)
         glUniform1i(self.instanced_render_mod_uniform, self.render_mode)
-        glUniform1f(self.instanced_fovy_uniform, math.radians(45.0))  # 45 degrees in radians
-        glUniform1f(self.instanced_aspect_uniform, viewport_width / viewport_height)
         
         # Bind VAO and render
         glBindVertexArray(self.instanced_vao)
