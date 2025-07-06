@@ -127,7 +127,7 @@ def compute_2d_covariance(view_space_positions, scales, rotations, mv_matrix, pr
         qy = rotations[rot_offset + 2]
         qz = rotations[rot_offset + 3]
         
-        # Build 3D covariance matrix: Σ = R * S * S^T * R^T
+        # Build 3D covariance matrix like working method: Σ = (S*R)^T * (S*R)
         # First build rotation matrix R from quaternion
         r11 = 1.0 - 2.0 * (qy*qy + qz*qz)
         r12 = 2.0 * (qx*qy - qw*qz)
@@ -139,24 +139,19 @@ def compute_2d_covariance(view_space_positions, scales, rotations, mv_matrix, pr
         r32 = 2.0 * (qy*qz + qw*qx)
         r33 = 1.0 - 2.0 * (qx*qx + qy*qy)
         
-        # S * S^T is diagonal with squared scale values
-        sx2 = sx * sx
-        sy2 = sy * sy
-        sz2 = sz * sz
+        # Compute M = S * R (scale THEN rotate like working method)
+        # S is diagonal, so this scales the columns of R
+        m11 = sx * r11; m12 = sx * r12; m13 = sx * r13
+        m21 = sy * r21; m22 = sy * r22; m23 = sy * r23
+        m31 = sz * r31; m32 = sz * r32; m33 = sz * r33
         
-        # Compute R * S * S^T * R^T
-        # First compute R * S^2 (S^2 is diagonal, so this scales rows of R)
-        rs11 = r11 * sx2; rs12 = r12 * sy2; rs13 = r13 * sz2
-        rs21 = r21 * sx2; rs22 = r22 * sy2; rs23 = r23 * sz2
-        rs31 = r31 * sx2; rs32 = r32 * sy2; rs33 = r33 * sz2
-        
-        # Now compute (R * S^2) * R^T
-        cov3d_00 = rs11*r11 + rs12*r12 + rs13*r13
-        cov3d_01 = rs11*r21 + rs12*r22 + rs13*r23
-        cov3d_02 = rs11*r31 + rs12*r32 + rs13*r33
-        cov3d_11 = rs21*r21 + rs22*r22 + rs23*r23
-        cov3d_12 = rs21*r31 + rs22*r32 + rs23*r33
-        cov3d_22 = rs31*r31 + rs32*r32 + rs33*r33
+        # Compute Σ = M^T * M = (S*R)^T * (S*R)
+        cov3d_00 = m11*m11 + m21*m21 + m31*m31
+        cov3d_01 = m11*m12 + m21*m22 + m31*m32
+        cov3d_02 = m11*m13 + m21*m23 + m31*m33
+        cov3d_11 = m12*m12 + m22*m22 + m32*m32
+        cov3d_12 = m12*m13 + m22*m23 + m32*m33
+        cov3d_22 = m13*m13 + m23*m23 + m33*m33
         
         # Extract the 3x3 rotation part of the model-view matrix
         w00 = mv_matrix[0]; w01 = mv_matrix[1]; w02 = mv_matrix[2]

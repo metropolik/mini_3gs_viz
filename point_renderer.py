@@ -1,6 +1,7 @@
 from OpenGL.GL import *
 import numpy as np
 from math import sin, cos, radians
+import math
 import os
 import open3d as o3d
 import ctypes
@@ -115,6 +116,8 @@ class PointRenderer:
         out vec4 quadData;
         
         uniform vec2 viewport;  // Viewport dimensions for NDC conversion
+        uniform float fovy;     // Field of view Y in radians
+        uniform float aspect;   // Aspect ratio (width/height)
         
         void main()
         {
@@ -130,8 +133,28 @@ class PointRenderer:
             float cov2d_00 = inv_cov_11 / det_inv;
             float cov2d_11 = inv_cov_00 / det_inv;
             
-            // For debugging rotation issue: use fixed quad size
-            vec2 quadwh_ndc = vec2(0.1, 0.1);  // Fixed 0.1 NDC units for testing rotation
+            // Use the working method approach: 3 * sqrt(cov2d diagonal elements)
+            vec2 quadwh_scr = vec2(3.0 * sqrt(max(cov2d_00, 1e-6)), 3.0 * sqrt(max(cov2d_11, 1e-6)));
+            
+            // Convert screen space dimensions to NDC space like working method
+            // Working method: quadwh_ndc = quadwh_scr / wh * 2
+            // where wh = 2 * hfovxy_focal.xy * hfovxy_focal.z
+            
+            // Derive equivalent values:
+            // tan(fovy/2) = half FOV tangent for Y
+            // tan(fovx/2) = tan(fovy/2) * aspect for X  
+            float tan_half_fovy = tan(fovy * 0.5);
+            float tan_half_fovx = tan_half_fovy * aspect;
+            
+            // Focal lengths (from projection matrix diagonal elements)
+            float focal_y = 1.0 / tan_half_fovy;
+            float focal_x = focal_y / aspect;
+            
+            // Working method's wh = 2 * [tan_half_fovx, tan_half_fovy] * focal
+            // Simplified: wh = 2 * [tan_half_fovx * focal_x, tan_half_fovy * focal_y] = [2, 2]
+            vec2 wh = 2.0 * vec2(tan_half_fovx * focal_x, tan_half_fovy * focal_y);
+            
+            vec2 quadwh_ndc = quadwh_scr / wh * 2.0;
             
             // Apply quad offset in NDC space without rotation
             vec3 position;
@@ -258,6 +281,8 @@ class PointRenderer:
         # Get uniform locations
         self.instanced_viewport_uniform = glGetUniformLocation(self.instanced_shader_program, "viewport")
         self.instanced_render_mod_uniform = glGetUniformLocation(self.instanced_shader_program, "render_mod")
+        self.instanced_fovy_uniform = glGetUniformLocation(self.instanced_shader_program, "fovy")
+        self.instanced_aspect_uniform = glGetUniformLocation(self.instanced_shader_program, "aspect")
     
     
     
@@ -739,6 +764,8 @@ class PointRenderer:
         # Set uniforms
         glUniform2f(self.instanced_viewport_uniform, viewport_width, viewport_height)
         glUniform1i(self.instanced_render_mod_uniform, self.render_mode)
+        glUniform1f(self.instanced_fovy_uniform, math.radians(45.0))  # 45 degrees in radians
+        glUniform1f(self.instanced_aspect_uniform, viewport_width / viewport_height)
         
         # Bind VAO and render
         glBindVertexArray(self.instanced_vao)
