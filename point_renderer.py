@@ -187,15 +187,11 @@ class PointRenderer:
         # Render mode control
         self.render_mode = 0  # 0=gaussian, -3=flat ball, -4=gaussian ball
         
-        # CUDA kernels for transformations
+        # No longer need CUDA kernels - using Python implementations
         self.transform_kernel = None
         self.transform_perspective_kernel = None
         self.covariance_kernel = None
         self.quad_generation_kernel = None
-        if CUPY_AVAILABLE:
-            self._load_transform_kernel()
-        else:
-            raise RuntimeError("CuPy is required for the custom transform kernel")
         
         # Initialize if PLY file is provided, otherwise use hardcoded Gaussians
         if ply_path and os.path.exists(ply_path):
@@ -283,18 +279,6 @@ class PointRenderer:
         self.instanced_viewport_uniform = glGetUniformLocation(self.instanced_shader_program, "viewport")
         self.instanced_render_mod_uniform = glGetUniformLocation(self.instanced_shader_program, "render_mod")
     
-    def _load_transform_kernel(self):
-        """Load the custom CUDA transform kernels"""
-        try:
-            with open('transform_kernel.cu', 'r') as f:
-                kernel_source = f.read()
-            self.transform_kernel = cp.RawKernel(kernel_source, 'transform_points')
-            self.transform_perspective_kernel = cp.RawKernel(kernel_source, 'transform_points_with_perspective')
-            self.covariance_kernel = cp.RawKernel(kernel_source, 'compute_2d_covariance')
-            self.instance_generation_kernel = cp.RawKernel(kernel_source, 'generate_instance_data')
-            print("Custom transform, covariance, and instance kernels loaded successfully")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load transform kernels: {e}")
     
     
     def _load_ply(self):
@@ -524,7 +508,7 @@ class PointRenderer:
         if not self.shader_program or not self.vao:
             return
         
-        # Transform points using custom CUDA kernel (two-stage transformation)
+        # Transform points using Python implementation (two-stage transformation)
         # Add homogeneous coordinate (w=1) to all points
         homogeneous_positions = np.ones((self.num_points, 4), dtype=np.float32)
         homogeneous_positions[:, :3] = self.original_positions
