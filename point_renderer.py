@@ -130,14 +130,8 @@ class PointRenderer:
             float cov2d_00 = inv_cov_11 / det_inv;
             float cov2d_11 = inv_cov_00 / det_inv;
             
-            // Use the working method approach: 3 * sqrt(cov2d diagonal elements)
-            vec2 quadwh_scr = vec2(3.0 * sqrt(max(cov2d_00, 1e-6)), 3.0 * sqrt(max(cov2d_11, 1e-6)));
-            
-            // Convert screen space dimensions to NDC space
-            // The working method uses: quadwh_ndc = quadwh_scr / wh * 2
-            // where wh = 2 * hfovxy_focal.xy * hfovxy_focal.z
-            // Based on the debug output, we need about 1000x scaling, so approximate this
-            vec2 quadwh_ndc = quadwh_scr / viewport * 2.0 * 500.0;  // Approximate scaling factor
+            // For debugging rotation issue: use fixed quad size
+            vec2 quadwh_ndc = vec2(0.1, 0.1);  // Fixed 0.1 NDC units for testing rotation
             
             // Apply quad offset in NDC space without rotation
             vec3 position;
@@ -650,6 +644,10 @@ class PointRenderer:
             our_ndc_h = working_quad_h / (viewport_height * 0.5)
             print(f"    our NDC conversion: w={our_ndc_w:.8f}, h={our_ndc_h:.8f}")
             print(f"    viewport: {viewport_width}x{viewport_height}")
+            
+            # Check if off-diagonal covariance is significant (indicates rotation)
+            if abs(cov2d_01) > 1e-8:
+                print(f"    WARNING: non-zero off-diagonal cov2d_01={cov2d_01:.8f} - this causes rotation!")
         
         glBindBuffer(GL_ARRAY_BUFFER, self.instance_vbo)
         glBufferData(GL_ARRAY_BUFFER, instance_data.nbytes, instance_data, GL_DYNAMIC_DRAW)
