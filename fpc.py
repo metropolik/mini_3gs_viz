@@ -165,6 +165,15 @@ def main():
     print(f"Current: ply_file='{ply_path}'")
     print()
     
+    # Print SH implementation status
+    print("🌟 Spherical Harmonics Implementation Status:")
+    print("  ✅ PLY loading supports up to degree 3 SH (48 coefficients)")
+    print("  ✅ Shader constants defined for degrees 0-3")
+    print("  ✅ DC term evaluation implemented")
+    print("  ✅ Higher order evaluation: FULLY IMPLEMENTED!")
+    print("  🚀 Current: Complete SH evaluation with storage buffers")
+    print()
+    
     # Initialize GLFW
     if not glfw.init():
         return
@@ -232,6 +241,10 @@ def main():
     print("  2 - Billboard rendering mode")
     print("  3 - Flat Ball rendering mode") 
     print("  4 - Gaussian Ball rendering mode")
+    print("  Q - SH Degree 0 (DC only)")
+    print("  T - SH Degree 0+1")
+    print("  Y - SH Degree 0+1+2")
+    print("  U - SH Degree 0+1+2+3")
     print("  WASD - Move camera")
     print("  Mouse - Look around")
     print("  Scroll - Adjust speed")
@@ -265,6 +278,17 @@ def main():
             point_renderer.set_gaussian_ball_mode()
             print("Switched to Gaussian Ball mode")
         
+        # SH mode controls
+        elif glfw.get_key(window, glfw.KEY_Q) == glfw.PRESS:
+            point_renderer.set_sh_mode(0)
+        elif glfw.get_key(window, glfw.KEY_T) == glfw.PRESS:
+            point_renderer.set_sh_mode(1)
+        elif glfw.get_key(window, glfw.KEY_Y) == glfw.PRESS:
+            point_renderer.set_sh_mode(2)
+        elif glfw.get_key(window, glfw.KEY_U) == glfw.PRESS:
+            point_renderer.set_sh_mode(3)
+        
+        # Process camera movement
         camera.process_keyboard(window, delta_time)
         
         # Clear screen
